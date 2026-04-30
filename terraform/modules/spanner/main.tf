@@ -33,7 +33,7 @@ resource "google_spanner_database" "spanner_database" {
   instance = google_spanner_instance.spanner_instance.name
   name     = var.database_name
 
-  deletion_protection = true
+  deletion_protection = false
 
   version_retention_period = var.version_retention_period
 }
