@@ -35,3 +35,8 @@ variable "pubsub_topic_name" {
   type        = string
   description = "The name of the Pub/Sub topic for video processing notifications, enabling asynchronous communication between services."
 }
+
+variable "transcode_orch_sa_email" {
+  type        = string
+  description = "Service account email for the transcode orchestrator service."
+}

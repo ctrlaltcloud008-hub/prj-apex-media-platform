@@ -58,3 +58,48 @@ variable "gcs_service_account_email" {
   type        = string
   description = "The email of the service account that needs to be granted Pub/Sub publisher permissions for GCS notifications."
 }
+
+variable "ingestion_sa_email" {
+  type        = string
+  description = "Service account email for the ingestion service."
+}
+
+variable "transcode_orch_sa_email" {
+  type        = string
+  description = "Service account email for the transcode orchestrator service."
+}
+
+variable "transcode_callback_sa_email" {
+  type        = string
+  description = "Service account email for the transcode callback service."
+}
+
+variable "thumbnail_orch_sa_email" {
+  type        = string
+  description = "Service account email for the thumbnail orchestrator service."
+}
+
+variable "transcription_orch_sa_email" {
+  type        = string
+  description = "Service account email for the transcription orchestrator service."
+}
+
+variable "moderation_submitter_sa_email" {
+  type        = string
+  description = "Service account email for the moderation submitter service."
+}
+
+variable "saga_tracker_sa_email" {
+  type        = string
+  description = "Service account email for the saga tracker service."
+}
+
+variable "notification_sa_email" {
+  type        = string
+  description = "Service account email for the notification service."
+}
+
+variable "outbox_poller_sa_email" {
+  type        = string
+  description = "Service account email for the outbox poller service."
+}

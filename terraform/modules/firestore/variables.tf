@@ -31,3 +31,13 @@ variable "delete_protection_state" {
   type    = string
   default = "Delete protection: DELETE_PROTECTION_ENABLED or DELETE_PROTECTION_DISABLED"
 }
+
+variable "notification_sa_email" {
+  type        = string
+  description = "Service account email for the notification service."
+}
+
+variable "sweep_jobs_sa_email" {
+  type        = string
+  description = "Service account email for the sweep jobs service."
+}

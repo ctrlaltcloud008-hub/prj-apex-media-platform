@@ -20,13 +20,33 @@ locals {
       display_name = "Thumbnail Orchestrator"
       description  = "Rate-limited vertex AI job submission for thumbnail"
     }
+    thumbnail-worker = {
+      display_name = "Thumbnail Worker"
+      description  = "Reads uploads and writes generated thumbnails to storage"
+    }
     transcription-orch = {
       display_name = "Transcription Orchestrator"
       description  = "Rate-limited vertex AI job submission for transcription"
     }
+    transcription-worker = {
+      display_name = "Transcription Worker"
+      description  = "Reads uploads and writes generated captions to storage"
+    }
+    moderation-submitter = {
+      display_name = "Moderation Submitter"
+      description  = "Consumes moderation work items and submits jobs for analysis"
+    }
+    moderation-poller = {
+      display_name = "Moderation Poller"
+      description  = "Polls moderation job results and updates pipeline state"
+    }
     saga-tracker = {
       display_name = "Saga Tracker"
       description  = "Agggregates fan-out completion, triggers publish gate"
+    }
+    publish-gate = {
+      display_name = "Publish Gate"
+      description  = "Verifies publish readiness and finalizes video availability"
     }
     notification = {
       display_name = "Notification Service"
@@ -36,7 +56,7 @@ locals {
       display_name = "Outbox Poller"
       description  = "Drains transactional outbox to Pub/Sub"
     }
-    sweeps = {
+    sweep-jobs = {
       display_name = "Sweeps Jobs"
       description  = "Scheduled recovery jobs for stuck state"
     }
@@ -51,130 +71,3 @@ resource "google_service_account" "service" {
   display_name = each.value.display_name
   description  = each.value.description
 }
-
-
-# locals {
-#   spanner_users = [
-#     "upload-api",
-#     "ingestion",
-#     "transcode-orchestrator",
-#     "trancode-callback",
-#     "thumbnail-orchestrator",
-#     "transcription-orchestrator",
-#     "saga-tracker",
-#     "notification",
-#     "outbox-poller",
-#     "sweeps"
-#   ]
-# }
-#
-# resource "google_spanner_database_iam_member" "database_user" {
-#   for_each = toset(local.spanner_users)
-#
-#   project  = var.project_id
-#   instance = var.spanner_instance
-#   database = var.spanner_database
-#   role     = "roles/spanner.databaseUser"
-#   member   = "serviceAccount:${google_service_account.service[each.key].email}"
-# }
-#
-# resource "google_storage_bucket_iam_member" "upload_api_creator" {
-#   for_each = toset(var.upload_bucket_names)
-#
-#   bucket = each.value
-#   role   = "roles/storage.objectCreator"
-#   member = "serviceAccount:${google_service_account.service["upload-api"].email}"
-# }
-#
-# resource "google_storage_bucket_iam_member" "ingestion_viewer" {
-#   for_each = toset(var.upload_bucket_names)
-#
-#   bucket = each.value
-#   role   = "roles/storage.objectViewer"
-#   member = "serviceAccount:${google_service_account.service["ingestion"].email}"
-# }
-#
-# locals {
-#   outbox_poller_topics = [
-#     "video.validated",
-#     "video.fanout.thumbnail",
-#     "video.fanout.transcription",
-#     "video.fanout.moderation",
-#     "video.saga.moderation",
-#     "video.status.update"
-#   ]
-# }
-#
-# resource "google_pubsub_topic_iam_member" "outbox_poller_publisher" {
-#   for_each = toset(local.outbox_poller_topics)
-#
-#   topic  = var.pubsub_topic_ids[each.key]
-#   role   = "roles/pubsub.publisher"
-#   member = "serviceAccount:${google_service_account.service["outbox-poller"].email}"
-# }
-#
-# resource "google_project_iam_member" "transcode_orch_transcoder" {
-#   project = var.project_id
-#   role    = "roles/transcoder.admin"
-#   member  = "serviceAccount:${google_service_account.service["transcode-orchestrator"].email}"
-# }
-#
-# resource "google_project_iam_member" "thumbnail_orch_vertex" {
-#   project = var.project_id
-#   role    = "roles/aiplatform.user"
-#   member  = "serviceAccount:${google_service_account.service["thumbnail-orchestrator"].email}"
-# }
-#
-# resource "google_project_iam_member" "transcription_orch_vertex" {
-#   project = var.project_id
-#   role    = "roles/aiplatform.user"
-#   member  = "serviceAccount:${google_service_account.service["transcription-orchestrator"].email}"
-# }
-#
-# resource "google_project_iam_member" "notification_firestore" {
-#   project = var.project_id
-#   role    = "roles/datastore.user"
-#   member  = "serviceAccount:${google_service_account.service["notification"].email}"
-# }
-#
-# resource "google_storage_bucket_iam_member" "sweeps_viewer_upload" {
-#   for_each = toset(var.upload_bucket_names)
-#
-#   bucket = each.value
-#   role   = "roles/storage.objectAdmin"
-#   member = "serviceAccount:${google_service_account.service["sweeps"].email}"
-# }
-#
-# resource "google_storage_bucket_iam_member" "sweeps_admin_output" {
-#   for_each = toset(var.output_bucket_names)
-#
-#   bucket = each.value
-#   role   = "roles/storage.objectAdmin"
-#   member = "serviceAccount:${google_service_account.service["sweeps"].email}"
-# }
-#
-# resource "google_project_iam_member" "sweeps_vertex" {
-#   project = var.project_id
-#   role    = "roles/aiplatform.user"
-#   member  = "serviceAccount:${google_service_account.service["sweeps"].email}"
-# }
-#
-# resource "google_project_iam_member" "sweeps_firestore" {
-#   project = var.project_id
-#   role    = "roles/datastore.user"
-#   member  = "serviceAccount:${google_service_account.service["sweeps"].email}"
-# }
-#
-# resource "google_project_iam_member" "sweeps_pubsub" {
-#   project = var.project_id
-#   role    = "roles/pubsub.publisher"
-#   member  = "serviceAccount:${google_service_account.service["sweeps"].email}"
-# }
-#
-# resource "google_service_account_iam_member" "workload_identity" {
-#   for_each = local.services
-#
-#   service_account_id = google_service_account.service[each.key].name
-#   role               = "roles/iam.workloadIdentityUser"
-#   member             = "serviceAccount:${var.project_id}.svc.id.goog[default/apex-${each.key}]"
-# }

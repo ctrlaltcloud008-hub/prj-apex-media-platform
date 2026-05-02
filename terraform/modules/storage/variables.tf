@@ -37,3 +37,28 @@ variable "environment" {
   type        = string
   description = "The environment label for the Spanner instance, used for categorization and filtering in the GCP console."
 }
+
+variable "upload_api_sa_email" {
+  type        = string
+  description = "Service account email for the Upload API service."
+}
+
+variable "ingestion_sa_email" {
+  type        = string
+  description = "Service account email for the ingestion service."
+}
+
+variable "thumbnail_worker_sa_email" {
+  type        = string
+  description = "Service account email for the thumbnail worker service."
+}
+
+variable "transcription_worker_sa_email" {
+  type        = string
+  description = "Service account email for the transcription worker service."
+}
+
+variable "sweep_jobs_sa_email" {
+  type        = string
+  description = "Service account email for the sweep jobs service."
+}

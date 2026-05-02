@@ -67,3 +67,58 @@ variable "version_retention_period" {
   type        = string
   default     = "7d"
 }
+
+variable "upload_api_sa_email" {
+  type        = string
+  description = "Service account email for the Upload API service."
+}
+
+variable "ingestion_sa_email" {
+  type        = string
+  description = "Service account email for the ingestion service."
+}
+
+variable "transcode_orch_sa_email" {
+  type        = string
+  description = "Service account email for the transcode orchestrator service."
+}
+
+variable "transcode_callback_sa_email" {
+  type        = string
+  description = "Service account email for the transcode callback service."
+}
+
+variable "thumbnail_orch_sa_email" {
+  type        = string
+  description = "Service account email for the thumbnail orchestrator service."
+}
+
+variable "transcription_orch_sa_email" {
+  type        = string
+  description = "Service account email for the transcription orchestrator service."
+}
+
+variable "moderation_poller_sa_email" {
+  type        = string
+  description = "Service account email for the moderation poller service."
+}
+
+variable "saga_tracker_sa_email" {
+  type        = string
+  description = "Service account email for the saga tracker service."
+}
+
+variable "publish_gate_sa_email" {
+  type        = string
+  description = "Service account email for the publish gate service."
+}
+
+variable "outbox_poller_sa_email" {
+  type        = string
+  description = "Service account email for the outbox poller service."
+}
+
+variable "sweep_jobs_sa_email" {
+  type        = string
+  description = "Service account email for the sweep jobs service."
+}

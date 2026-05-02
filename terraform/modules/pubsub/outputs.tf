@@ -17,6 +17,7 @@ output "topic_names" {
 output "gcs_finalized_topic_id" {
   description = "The ID of the Pub/Sub topic for GCS finalized events."
   value       = google_pubsub_topic.topics["video.gcs.finalized"].id
+  depends_on  = [google_pubsub_topic_iam_member.service_publishers]
 }
 
 output "dlq_topic_id" {

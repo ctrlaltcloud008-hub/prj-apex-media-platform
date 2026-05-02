@@ -110,10 +110,3 @@ resource "google_pubsub_subscription" "subscriptions" {
 
   labels = local.default_lables
 }
-
-resource "google_pubsub_topic_iam_member" "gcs_publisher" {
-  project = var.project_id
-  topic   = google_pubsub_topic.topics["video.gcs.finalized"].name
-  role    = "roles/pubsub.publisher"
-  member  = "serviceAccount:${var.gcs_service_account_email}"
-}

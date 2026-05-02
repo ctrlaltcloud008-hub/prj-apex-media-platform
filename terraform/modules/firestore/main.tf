@@ -12,6 +12,13 @@ resource "google_project_service" "firebase_rules" {
   disable_dependent_services = true
 }
 
+resource "google_project_service" "firestore" {
+  project                    = var.project_id
+  service                    = "firestore.googleapis.com"
+  disable_on_destroy         = true
+  disable_dependent_services = true
+}
+
 resource "google_firestore_database" "main" {
   project     = var.project_id
   name        = "(default)"
@@ -22,6 +29,8 @@ resource "google_firestore_database" "main" {
   delete_protection_state = var.delete_protection_state
 
   point_in_time_recovery_enablement = "POINT_IN_TIME_RECOVERY_ENABLED"
+
+  depends_on = [google_project_service.firestore]
 }
 
 resource "google_firebaserules_ruleset" "firestore" {
@@ -42,13 +51,18 @@ resource "google_firebaserules_ruleset" "firestore" {
       EOT
     }
   }
-  depends_on = [google_firestore_database.main]
+  depends_on = [
+    google_firestore_database.main,
+    google_project_service.firebase_rules,
+  ]
 }
 
 resource "google_firebaserules_release" "release" {
   project      = var.project_id
   name         = "cloud.firestore/database=${google_firestore_database.main.name}"
   ruleset_name = google_firebaserules_ruleset.firestore.name
+
+  depends_on = [google_project_service.firebase_rules]
 }
 
 resource "google_firestore_index" "video_status_by_user" {
