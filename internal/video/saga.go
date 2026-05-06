@@ -5,26 +5,17 @@ import "fmt"
 type SagaTaskType string
 
 const (
-	SagaTaskTypeThumnail      SagaTaskType = "THUMBNAIL"
-	SagaTaksTypeTranscription SagaTaskType = "TRANSCRIPTION"
+	SagaTaskTypeThumbnail     SagaTaskType = "THUMBNAIL"
+	SagaTaskTypeTranscription SagaTaskType = "TRANSCRIPTION"
 	SagaTaskTypeModeration    SagaTaskType = "MODERATION"
 )
 
 func (s SagaTaskType) Validate() error {
 	switch s {
-	case SagaTaskTypeThumnail, SagaTaksTypeTranscription, SagaTaskTypeModeration:
+	case SagaTaskTypeThumbnail, SagaTaskTypeTranscription, SagaTaskTypeModeration:
 		return nil
 	default:
-		return fmt.Errorf("invalid saga task type(:%q)", s)
-	}
-}
-
-func (s SagaTaskType) IsTerminal() bool {
-	switch s {
-	case SagaTaskTypeThumnail, SagaTaksTypeTranscription, SagaTaskTypeModeration:
-		return false
-	default:
-		return true
+		return fmt.Errorf("invalid saga task type (%q)", s)
 	}
 }
 
@@ -51,6 +42,6 @@ func (s SagaTaskStatus) Validate() error {
 	case SagaTaskStatusPending, SagaTaskStatusInProgress, SagaTaskStatusCompleted, SagaTaskStatusFailed:
 		return nil
 	default:
-		return fmt.Errorf("invalid saga task status(:%q)", s)
+		return fmt.Errorf("invalid saga task status (%q)", s)
 	}
 }

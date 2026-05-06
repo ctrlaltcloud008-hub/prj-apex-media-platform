@@ -30,6 +30,12 @@ type roConfig struct {
 	staleness time.Duration
 }
 
+func WithMaxStaleness(staleness time.Duration) ReadOnlyOption {
+	return func(cfg *roConfig) {
+		cfg.staleness = staleness
+	}
+}
+
 func NewClient(ctx context.Context, database string, cfg Config, opts ...option.ClientOption) (*spanner.Client, error) {
 
 	if database == "" {

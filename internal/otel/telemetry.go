@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 
-	"cloud.google.com/go/pubsub/v2"
 	"go.opentelemetry.io/contrib/detectors/gcp"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -12,12 +11,11 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	sdkresource "go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/oauth"
 )
 
-type tracerConfig struct {
+type TracerConfig struct {
 	AppEnv      string
 	ServiceName string
 	ProjectID   string
@@ -25,22 +23,21 @@ type tracerConfig struct {
 
 const TracerName = "internal/otel"
 
-func InitTracer(ctx context.Context, cfg tracerConfig) (func(ctx context.Context) error, error) {
+func InitTracer(ctx context.Context, cfg TracerConfig) (func(ctx context.Context) error, error) {
 
 	var shutdownFuncs []func(ctx context.Context) error
-	var err error
 
 	shutdown := func(ctx context.Context) error {
 		var err error
-		for _, f := range shutdownFuncs {
-			err = errors.Join(err, f(ctx))
+		for i := len(shutdownFuncs) - 1; i >= 0; i-- {
+			err = errors.Join(err, shutdownFuncs[i](ctx))
 		}
 		shutdownFuncs = nil
 		return err
 	}
 
-	handleError := func(err error) {
-		err = errors.Join(err, shutdown(ctx))
+	cleanupOnError := func(err error) error {
+		return errors.Join(err, shutdown(ctx))
 	}
 
 	prop := propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{})
@@ -48,7 +45,7 @@ func InitTracer(ctx context.Context, cfg tracerConfig) (func(ctx context.Context
 	otel.SetTextMapPropagator(prop)
 
 	res, err := sdkresource.New(
-		context.Background(),
+		ctx,
 		sdkresource.WithTelemetrySDK(),
 		sdkresource.WithDetectors(gcp.NewDetector()),
 		sdkresource.WithAttributes(
@@ -59,8 +56,7 @@ func InitTracer(ctx context.Context, cfg tracerConfig) (func(ctx context.Context
 	)
 
 	if err != nil {
-		handleError(err)
-		return shutdown, err
+		return shutdown, cleanupOnError(err)
 	}
 
 	if cfg.AppEnv == "local" {
@@ -76,8 +72,7 @@ func InitTracer(ctx context.Context, cfg tracerConfig) (func(ctx context.Context
 
 	creds, err := oauth.NewApplicationDefault(ctx)
 	if err != nil {
-		handleError(err)
-		return shutdown, err
+		return shutdown, cleanupOnError(err)
 	}
 
 	exporter, err := otlptracegrpc.New(
@@ -88,8 +83,7 @@ func InitTracer(ctx context.Context, cfg tracerConfig) (func(ctx context.Context
 		}))
 
 	if err != nil {
-		handleError(err)
-		return shutdown, err
+		return shutdown, cleanupOnError(err)
 	}
 
 	tp := sdktrace.NewTracerProvider(
@@ -100,29 +94,4 @@ func InitTracer(ctx context.Context, cfg tracerConfig) (func(ctx context.Context
 	otel.SetTracerProvider(tp)
 
 	return shutdown, nil
-}
-
-func SpanFromPubSubMessage(ctx context.Context, msg *pubsub.Message, spanName string) (context.Context, trace.Span) {
-	attrs := msg.Attributes
-	if attrs == nil {
-		attrs = map[string]string{}
-	}
-	ctx = otel.GetTextMapPropagator().Extract(ctx, propagation.MapCarrier(attrs))
-	ctx, span := otel.Tracer(TracerName).Start(
-		ctx,
-		spanName,
-		trace.WithSpanKind(trace.SpanKindConsumer),
-	)
-	if videoID := attrs["video.id"]; videoID != "" {
-		span.SetAttributes(attribute.String("video.id", videoID))
-	} else if videoID := attrs["video_id"]; videoID != "" {
-		span.SetAttributes(attribute.String("video.id", videoID))
-	}
-	return ctx, span
-}
-func InjectIntoPubSubMessage(ctx context.Context, msg *pubsub.Message) {
-	if msg.Attributes == nil {
-		msg.Attributes = make(map[string]string)
-	}
-	otel.GetTextMapPropagator().Inject(ctx, propagation.MapCarrier(msg.Attributes))
 }

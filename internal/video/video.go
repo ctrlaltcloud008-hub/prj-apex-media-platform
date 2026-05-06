@@ -7,8 +7,8 @@ import (
 )
 
 type Video struct {
-	VideoId            string             `spanner:"video_id"`
-	UserId             string             `spanner:"user_id"`
+	VideoID            string             `spanner:"video_id"`
+	UserID             string             `spanner:"user_id"`
 	Status             Status             `spanner:"status"`
 	SourceBucket       string             `spanner:"source_bucket"`
 	SourceObject       string             `spanner:"source_object"`
@@ -21,12 +21,12 @@ type Video struct {
 	SourceCodec        spanner.NullString `spanner:"source_codec"`
 	IsHDR              spanner.NullBool   `spanner:"is_hdr"`
 	TranscodeProfile   spanner.NullString `spanner:"transcode_profile"`
-	TranscoderJobId    spanner.NullString `spanner:"transcoder_job_id"`
+	TranscoderJobID    spanner.NullString `spanner:"transcoder_job_id"`
 	ThumbnailUri       spanner.NullString `spanner:"thumbnail_uri"`
 	CaptionUri         spanner.NullString `spanner:"caption_uri"`
 	ModerationDecision spanner.NullString `spanner:"moderation_decision"`
 
-	ErrorDetails spanner.NullString `spanner:"error_details"`
-	CreatedAt    time.Time          `spanner:"created_at"`
-	UpdatedAt    time.Time          `spanner:"updated_at"`
+	ErrorDetails spanner.NullJSON `spanner:"error_details"`
+	CreatedAt    time.Time        `spanner:"created_at"`
+	UpdatedAt    time.Time        `spanner:"updated_at"`
 }

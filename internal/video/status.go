@@ -28,7 +28,7 @@ func (s Status) Validate() error {
 		StatusReady, StatusRejected, StatusFailed, StatusExpired:
 		return nil
 	default:
-		return fmt.Errorf("invalid status(:%q)", s)
+		return fmt.Errorf("invalid status (%q)", s)
 	}
 }
 

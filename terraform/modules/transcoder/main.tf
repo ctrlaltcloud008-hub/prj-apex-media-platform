@@ -120,7 +120,7 @@ resource "google_transcoder_job_template" "profiles" {
 
   project         = var.project_id
   location        = each.value.region
-  job_template_id = "${var.environment}-${each.value.profile_name}"
+  job_template_id = "${var.environment}-transcoder-${each.value.profile_name}"
 
   config {
     elementary_streams {

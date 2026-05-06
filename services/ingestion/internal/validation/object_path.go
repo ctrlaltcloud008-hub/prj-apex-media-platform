@@ -1,0 +1,27 @@
+package validation
+
+import (
+	"fmt"
+	"strings"
+)
+
+func ParseObjectPath(objectID string) (string, string, error) {
+	parts := strings.SplitN(objectID, "/", 3)
+	if len(parts) < 3 {
+		return "", "", fmt.Errorf("invalid object path: %s", objectID)
+	}
+
+	userID := parts[0]
+	videoID := parts[1]
+	filename := parts[2]
+
+	if !strings.HasPrefix(filename, "source.") {
+		return "", "", fmt.Errorf("unexpected filename %q, expected source.{ext}", filename)
+	}
+
+	if userID == "" || videoID == "" {
+		return "", "", fmt.Errorf("userID or videoID is empty in object path: %s", objectID)
+	}
+
+	return userID, videoID, nil
+}
