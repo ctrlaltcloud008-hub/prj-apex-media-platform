@@ -7,13 +7,17 @@ import (
 	"go.opentelemetry.io/contrib/detectors/gcp"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/propagation"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	sdkresource "go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/oauth"
 )
+
+const cloudPlatformScope = "https://www.googleapis.com/auth/cloud-platform"
 
 type TracerConfig struct {
 	AppEnv      string
@@ -26,6 +30,7 @@ const TracerName = "internal/otel"
 func InitTracer(ctx context.Context, cfg TracerConfig) (func(ctx context.Context) error, error) {
 
 	var shutdownFuncs []func(ctx context.Context) error
+	exportCtx := context.WithoutCancel(ctx)
 
 	shutdown := func(ctx context.Context) error {
 		var err error
@@ -60,23 +65,26 @@ func InitTracer(ctx context.Context, cfg TracerConfig) (func(ctx context.Context
 	}
 
 	if cfg.AppEnv == "local" {
+		mp := sdkmetric.NewMeterProvider(sdkmetric.WithResource(res))
 		tp := sdktrace.NewTracerProvider(
 			sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.AlwaysSample())),
 			sdktrace.WithResource(res),
 		)
 
+		shutdownFuncs = append(shutdownFuncs, mp.Shutdown)
 		shutdownFuncs = append(shutdownFuncs, tp.Shutdown)
+		otel.SetMeterProvider(mp)
 		otel.SetTracerProvider(tp)
 		return shutdown, nil
 	}
 
-	creds, err := oauth.NewApplicationDefault(ctx)
+	creds, err := oauth.NewApplicationDefault(exportCtx, cloudPlatformScope)
 	if err != nil {
 		return shutdown, cleanupOnError(err)
 	}
 
 	exporter, err := otlptracegrpc.New(
-		ctx,
+		exportCtx,
 		otlptracegrpc.WithDialOption(grpc.WithPerRPCCredentials(creds)),
 		otlptracegrpc.WithHeaders(map[string]string{
 			"x-goog-user-project": cfg.ProjectID,
@@ -86,11 +94,28 @@ func InitTracer(ctx context.Context, cfg TracerConfig) (func(ctx context.Context
 		return shutdown, cleanupOnError(err)
 	}
 
+	metricExporter, err := otlpmetricgrpc.New(
+		exportCtx,
+		otlpmetricgrpc.WithDialOption(grpc.WithPerRPCCredentials(creds)),
+		otlpmetricgrpc.WithHeaders(map[string]string{
+			"x-goog-user-project": cfg.ProjectID,
+		}),
+	)
+	if err != nil {
+		return shutdown, cleanupOnError(err)
+	}
+
 	tp := sdktrace.NewTracerProvider(
 		sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.AlwaysSample())),
 		sdktrace.WithBatcher(exporter), sdktrace.WithResource(res))
+	mp := sdkmetric.NewMeterProvider(
+		sdkmetric.WithReader(sdkmetric.NewPeriodicReader(metricExporter)),
+		sdkmetric.WithResource(res),
+	)
 
+	shutdownFuncs = append(shutdownFuncs, mp.Shutdown)
 	shutdownFuncs = append(shutdownFuncs, tp.Shutdown)
+	otel.SetMeterProvider(mp)
 	otel.SetTracerProvider(tp)
 
 	return shutdown, nil

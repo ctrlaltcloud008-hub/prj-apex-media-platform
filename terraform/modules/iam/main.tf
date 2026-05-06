@@ -71,3 +71,25 @@ resource "google_service_account" "service" {
   display_name = each.value.display_name
   description  = each.value.description
 }
+
+resource "google_project_iam_member" "metric_writer" {
+  for_each = local.services
+
+  project = var.project_id
+  role    = "roles/monitoring.metricWriter"
+  member  = "serviceAccount:${google_service_account.service[each.key].email}"
+}
+
+resource "google_project_iam_member" "trace_agent" {
+  for_each = local.services
+
+  project = var.project_id
+  role    = "roles/cloudtrace.agent"
+  member  = "serviceAccount:${google_service_account.service[each.key].email}"
+}
+
+resource "google_service_account_iam_member" "ingestion_self_token_creator" {
+  service_account_id = google_service_account.service["ingestion"].name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = "serviceAccount:${google_service_account.service["ingestion"].email}"
+}

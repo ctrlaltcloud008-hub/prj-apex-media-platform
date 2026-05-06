@@ -1,6 +1,6 @@
 terraform {
   backend "gcs" {
     bucket = "apex-bkt-tf-state"
-    prefix = "terraform/state"
+    prefix = "terraform/state/production"
   }
 }
