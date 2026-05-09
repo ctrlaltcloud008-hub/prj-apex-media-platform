@@ -16,20 +16,20 @@ import (
 	"github.com/ctrlaltcloud008-hub/prj-apex-media-platform/internal/otel"
 	pbclient "github.com/ctrlaltcloud008-hub/prj-apex-media-platform/internal/pubsub"
 	"github.com/ctrlaltcloud008-hub/prj-apex-media-platform/internal/spanner"
-	"github.com/ctrlaltcloud008-hub/prj-apex-media-platform/services/ingestion/internal/config"
-	"github.com/ctrlaltcloud008-hub/prj-apex-media-platform/services/ingestion/internal/gcs"
-	"github.com/ctrlaltcloud008-hub/prj-apex-media-platform/services/ingestion/internal/handler"
+	"github.com/ctrlaltcloud008-hub/prj-apex-media-platform/services/outbox-poller/internal/config"
+	"github.com/ctrlaltcloud008-hub/prj-apex-media-platform/services/outbox-poller/internal/poller"
+	"github.com/ctrlaltcloud008-hub/prj-apex-media-platform/services/outbox-poller/internal/publisher"
 )
 
 func main() {
 	if err := run(); err != nil {
-		log.Fatalf("ingestion service failed: %v", err)
+		log.Fatalf("outbox poller service failed: %v", err)
 	}
 }
 
 func run() error {
 
-	cfg, err := config.LoadIngestionConfig()
+	cfg, err := config.LoadOutboxPollerConfig()
 	if err != nil {
 		return err
 	}
@@ -39,14 +39,14 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	trCfg := otel.TracerConfig{
+	trcfg := otel.TracerConfig{
 		AppEnv:      cfg.AppEnv(),
 		ServiceName: cfg.Service(),
 		ProjectID:   cfg.ProjectID(),
 		Region:      cfg.Region(),
 	}
 
-	shutdown, err := otel.InitTracer(ctx, trCfg)
+	shutdown, err := otel.InitTracer(ctx, trcfg)
 	if err != nil {
 		return err
 	}
@@ -70,25 +70,20 @@ func run() error {
 
 	defer client.Close()
 
-	subscriber := pbclient.NewSubscriber(client, cfg.Subscription(),
-		pbclient.WithMaxOutstandingMessages(100),
-		pbclient.WithNumGoroutines(10),
-		pbclient.WithMaxOutstandingBytes(100*1024*1024),
-	)
-
-	storage, err := gcs.NewClient(ctx)
-	if err != nil {
-		return err
-	}
-	defer storage.Close()
+	publisher := publisher.NewTopicPublisher(client)
+	defer publisher.Stop()
 
 	spannerClient, err := spanner.NewClient(ctx, cfg.SpannerDatabase(), spanner.DefaultConfig())
+
 	if err != nil {
 		return err
 	}
+
 	defer spannerClient.Close()
 
-	messageHandler := handler.NewHandler(logger, subscriber, storage, spannerClient, cfg.Region())
+	assignedShards := allShards(cfg.ShardCount())
+	p := poller.NewPoller(spannerClient, publisher, cfg.BatchSize(), assignedShards, logger)
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -100,34 +95,35 @@ func run() error {
 		Handler: mux,
 	}
 
-	handlerErrCh := make(chan error, 1)
 	serverErrCh := make(chan error, 1)
 	var wg sync.WaitGroup
 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if err := messageHandler.Start(ctx); err != nil && !errors.Is(err, context.Canceled) {
-			handlerErrCh <- fmt.Errorf("message handler: %w", err)
+		logger.Info(ctx, "server.starting", "Starting HTTP server", slog.String("addr", cfg.Port()))
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			serverErrCh <- err
 		}
 	}()
 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		logger.Info(ctx, "server.starting", "Starting HTTP server", slog.String("addr", cfg.Port()))
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			serverErrCh <- fmt.Errorf("http server: %w", err)
-		}
+		logger.Info(ctx, "outbox_poller.starting", "Starting outbox poller",
+			slog.Int64("batch_size", cfg.BatchSize()),
+			slog.Int("poll_interval_ms", cfg.PollIntervalMS()),
+			slog.Any("assigned_shards", assignedShards),
+		)
+
+		p.Run(ctx, time.Duration(cfg.PollIntervalMS())*time.Millisecond)
 	}()
 
 	var runErr error
 	select {
 	case <-ctx.Done():
 		logger.Info(ctx, "shutdown.initiated", "Shutdown signal received")
-	case err := <-handlerErrCh:
-		runErr = err
-		logger.Error(ctx, "handler.failed", "Message handler stopped unexpectedly", slog.String("error", err.Error()))
+
 	case err := <-serverErrCh:
 		runErr = err
 		logger.Error(ctx, "server.failed", "HTTP server failed", slog.String("error", err.Error()))
@@ -151,4 +147,13 @@ func run() error {
 
 	return runErr
 
+}
+
+func allShards(n int) []int64 {
+	shards := make([]int64, 0, n)
+	for i := 0; i < n; i++ {
+		shards = append(shards, int64(i))
+	}
+
+	return shards
 }

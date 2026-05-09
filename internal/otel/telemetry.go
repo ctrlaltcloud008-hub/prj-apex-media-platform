@@ -3,6 +3,8 @@ package otel
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
 
 	"go.opentelemetry.io/contrib/detectors/gcp"
 	"go.opentelemetry.io/otel"
@@ -13,19 +15,39 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	sdkresource "go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	semconv "go.opentelemetry.io/otel/semconv/v1.37.0"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/oauth"
 )
 
 const cloudPlatformScope = "https://www.googleapis.com/auth/cloud-platform"
+const googleTelemetryEndpoint = "telemetry.googleapis.com:443"
 
 type TracerConfig struct {
 	AppEnv      string
 	ServiceName string
 	ProjectID   string
+	Region      string
 }
 
 const TracerName = "internal/otel"
+
+func defaultServiceNamespace(projectID string) string {
+	if projectID == "" {
+		return "default"
+	}
+
+	return projectID
+}
+
+func defaultServiceInstanceID(serviceName string) string {
+	hostname, err := os.Hostname()
+	if err != nil || hostname == "" {
+		hostname = "unknown-host"
+	}
+
+	return fmt.Sprintf("%s-%s-%d", serviceName, hostname, os.Getpid())
+}
 
 func InitTracer(ctx context.Context, cfg TracerConfig) (func(ctx context.Context) error, error) {
 
@@ -49,14 +71,21 @@ func InitTracer(ctx context.Context, cfg TracerConfig) (func(ctx context.Context
 
 	otel.SetTextMapPropagator(prop)
 
+	serviceNamespace := defaultServiceNamespace(cfg.ProjectID)
+	serviceInstanceID := defaultServiceInstanceID(cfg.ServiceName)
+
 	res, err := sdkresource.New(
 		ctx,
 		sdkresource.WithTelemetrySDK(),
 		sdkresource.WithDetectors(gcp.NewDetector()),
 		sdkresource.WithAttributes(
-			attribute.String("service.name", cfg.ServiceName),
+			semconv.ServiceName(cfg.ServiceName),
+			semconv.ServiceNamespace(serviceNamespace),
+			semconv.ServiceInstanceID(serviceInstanceID),
+			semconv.CloudRegion(cfg.Region),
 			attribute.String("service.environment", cfg.AppEnv),
 			attribute.String("project.id", cfg.ProjectID),
+			attribute.String("gcp.project_id", cfg.ProjectID),
 		),
 	)
 
@@ -85,6 +114,7 @@ func InitTracer(ctx context.Context, cfg TracerConfig) (func(ctx context.Context
 
 	exporter, err := otlptracegrpc.New(
 		exportCtx,
+		otlptracegrpc.WithEndpoint(googleTelemetryEndpoint),
 		otlptracegrpc.WithDialOption(grpc.WithPerRPCCredentials(creds)),
 		otlptracegrpc.WithHeaders(map[string]string{
 			"x-goog-user-project": cfg.ProjectID,
@@ -96,6 +126,7 @@ func InitTracer(ctx context.Context, cfg TracerConfig) (func(ctx context.Context
 
 	metricExporter, err := otlpmetricgrpc.New(
 		exportCtx,
+		otlpmetricgrpc.WithEndpoint(googleTelemetryEndpoint),
 		otlpmetricgrpc.WithDialOption(grpc.WithPerRPCCredentials(creds)),
 		otlpmetricgrpc.WithHeaders(map[string]string{
 			"x-goog-user-project": cfg.ProjectID,

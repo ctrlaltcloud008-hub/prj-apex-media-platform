@@ -27,8 +27,15 @@ resource "google_firestore_database" "main" {
 
   concurrency_mode        = "OPTIMISTIC"
   delete_protection_state = var.delete_protection_state
+  deletion_policy         = "DELETE"
 
   point_in_time_recovery_enablement = "POINT_IN_TIME_RECOVERY_ENABLED"
+
+  timeouts {
+    create = "30m"
+    delete = "30m"
+    update = "30m"
+  }
 
   depends_on = [google_project_service.firestore]
 }

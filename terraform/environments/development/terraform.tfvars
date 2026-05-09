@@ -33,4 +33,4 @@ push_endpoints = {
   "sub-notification"       = "https://placeholder.com/notification"
 }
 
-delete_protection_state = "DELETE_PROTECTION_ENABLED"
+delete_protection_state = "DELETE_PROTECTION_DISABLED"

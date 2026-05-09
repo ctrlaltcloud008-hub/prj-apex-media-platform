@@ -25,6 +25,12 @@ resource "google_vpc_access_connector" "connector" {
   min_instances = 2
   max_instances = 10
   machine_type  = "e2-standard-4"
+
+  timeouts {
+    create = "30m"
+    delete = "30m"
+    update = "30m"
+  }
 }
 
 resource "google_compute_firewall" "allow_internal" {

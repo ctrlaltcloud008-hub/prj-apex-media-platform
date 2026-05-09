@@ -66,10 +66,11 @@ locals {
 resource "google_service_account" "service" {
   for_each = local.services
 
-  project      = var.project_id
-  account_id   = "apex-${each.key}"
-  display_name = each.value.display_name
-  description  = each.value.description
+  project                      = var.project_id
+  account_id                   = "apex-${each.key}"
+  display_name                 = each.value.display_name
+  description                  = each.value.description
+  create_ignore_already_exists = true
 }
 
 resource "google_project_iam_member" "metric_writer" {
@@ -92,4 +93,10 @@ resource "google_service_account_iam_member" "ingestion_self_token_creator" {
   service_account_id = google_service_account.service["ingestion"].name
   role               = "roles/iam.serviceAccountTokenCreator"
   member             = "serviceAccount:${google_service_account.service["ingestion"].email}"
+}
+
+resource "google_service_account_iam_member" "upload_api_self_token_creator" {
+  service_account_id = google_service_account.service["upload-api"].name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = "serviceAccount:${google_service_account.service["upload-api"].email}"
 }

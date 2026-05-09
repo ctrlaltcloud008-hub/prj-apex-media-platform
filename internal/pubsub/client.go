@@ -3,6 +3,7 @@ package pubsub
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"cloud.google.com/go/pubsub/v2"
 	"github.com/ctrlaltcloud008-hub/prj-apex-media-platform/internal/outbox"
@@ -46,9 +47,28 @@ type Publisher struct {
 	topic string
 }
 
-func NewPublisher(client *pubsub.Client, topicID string) *Publisher {
+type PublisherOption func(*pubsub.Publisher)
+
+func WithCountThreshold(count int) PublisherOption {
+	return func(p *pubsub.Publisher) { p.PublishSettings.CountThreshold = count }
+}
+
+func WithByteThreshold(bytes int) PublisherOption {
+	return func(p *pubsub.Publisher) { p.PublishSettings.ByteThreshold = bytes }
+}
+
+func WithDelayThreshold(delay time.Duration) PublisherOption {
+	return func(p *pubsub.Publisher) { p.PublishSettings.DelayThreshold = delay }
+}
+
+func NewPublisher(client *pubsub.Client, topicID string, opts ...PublisherOption) *Publisher {
+
+	pub := client.Publisher(topicID)
+	for _, opt := range opts {
+		opt(pub)
+	}
 	return &Publisher{
-		inner: client.Publisher(topicID),
+		inner: pub,
 		topic: topicID,
 	}
 }
