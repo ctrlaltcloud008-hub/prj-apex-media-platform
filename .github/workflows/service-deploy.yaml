@@ -1,0 +1,228 @@
+name: Service Deploy
+
+on:
+  workflow_call:
+    inputs:
+      service:
+        required: true
+        type: string
+      dockerfile:
+        required: true
+        type: string
+      deployfile:
+        required: true
+        type: string
+      context:
+        required: true
+        type: string
+      go_version:
+        required: true
+        type: string
+      artifact_region:
+        required: true
+        type: string
+      artifact_repository:
+        required: true
+        type: string
+      environment_name:
+        required: true
+        type: string
+      project_secret_name:
+        required: true
+        type: string
+      wif_secret_name:
+        required: true
+        type: string
+      deploy_sa_secret_name:
+        required: true
+        type: string
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ inputs.go_version }}
+          cache: true
+
+      - name: Resolve environment secrets
+        id: envvars
+        shell: bash
+        env:
+          GCP_PROJECT_ID_DEV: ${{ secrets.GCP_PROJECT_ID_DEV }}
+          GCP_PROJECT_ID_STAGING: ${{ secrets.GCP_PROJECT_ID_STAGING }}
+          GCP_PROJECT_ID_PROD: ${{ secrets.GCP_PROJECT_ID_PROD }}
+          GCP_WORKLOAD_IDENTITY_PROVIDER_DEV: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_DEV }}
+          GCP_WORKLOAD_IDENTITY_PROVIDER_STAGING: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STAGING }}
+          GCP_WORKLOAD_IDENTITY_PROVIDER_PROD: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_PROD }}
+          GCP_DEPLOY_SERVICE_ACCOUNT_DEV: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_DEV }}
+          GCP_DEPLOY_SERVICE_ACCOUNT_STAGING: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STAGING }}
+          GCP_DEPLOY_SERVICE_ACCOUNT_PROD: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_PROD }}
+        run: |
+          PROJECT_VAR="${{ inputs.project_secret_name }}"
+          WIF_VAR="${{ inputs.wif_secret_name }}"
+          SA_VAR="${{ inputs.deploy_sa_secret_name }}"
+          echo "project_id=${!PROJECT_VAR}" >> "$GITHUB_OUTPUT"
+          echo "workload_identity_provider=${!WIF_VAR}" >> "$GITHUB_OUTPUT"
+          echo "service_account=${!SA_VAR}" >> "$GITHUB_OUTPUT"
+
+      - name: Parse deploy config
+        id: config
+        shell: bash
+        run: |
+          CONFIG_JSON="$(python3 .github/scripts/parse-deploy-config.py '${{ inputs.deployfile }}' '${{ inputs.service }}' '${{ steps.envvars.outputs.project_id }}')"
+          echo "config=$CONFIG_JSON" >> "$GITHUB_OUTPUT"
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          token_format: access_token
+          workload_identity_provider: ${{ steps.envvars.outputs.workload_identity_provider }}
+          service_account: ${{ steps.envvars.outputs.service_account }}
+
+      - name: Login to Artifact Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ inputs.artifact_region }}-docker.pkg.dev
+          username: oauth2accesstoken
+          password: ${{ steps.auth.outputs.access_token }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          push: true
+          provenance: true
+          sbom: true
+          tags: |
+            ${{ inputs.artifact_region }}-docker.pkg.dev/${{ steps.envvars.outputs.project_id }}/${{ inputs.artifact_repository }}/${{ inputs.service }}:${{ github.sha }}
+            ${{ inputs.artifact_region }}-docker.pkg.dev/${{ steps.envvars.outputs.project_id }}/${{ inputs.artifact_repository }}/${{ inputs.service }}:${{ inputs.environment_name }}
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Render env file
+        shell: bash
+        run: |
+          python3 .github/scripts/render-cloud-run-env.py '${{ steps.config.outputs.config }}' cloud-run-env.yaml
+
+      - name: Render secret bindings
+        id: secret_bindings
+        shell: bash
+        run: |
+          echo "bindings=$(python3 .github/scripts/render-cloud-run-secrets.py '${{ steps.config.outputs.config }}')" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy service
+        shell: bash
+        run: |
+          SERVICE_NAME=$(python3 - <<'PY' '${{ steps.config.outputs.config }}'
+import json, sys
+print(json.loads(sys.argv[1])["service_name"])
+PY
+)
+          REGION=$(python3 - <<'PY' '${{ steps.config.outputs.config }}'
+import json, sys
+print(json.loads(sys.argv[1])["region"])
+PY
+)
+          PORT=$(python3 - <<'PY' '${{ steps.config.outputs.config }}'
+import json, sys
+print(json.loads(sys.argv[1])["port"])
+PY
+)
+          INGRESS=$(python3 - <<'PY' '${{ steps.config.outputs.config }}'
+import json, sys
+print(json.loads(sys.argv[1])["ingress"])
+PY
+)
+          CPU=$(python3 - <<'PY' '${{ steps.config.outputs.config }}'
+import json, sys
+print(json.loads(sys.argv[1])["cpu"])
+PY
+)
+          MEMORY=$(python3 - <<'PY' '${{ steps.config.outputs.config }}'
+import json, sys
+print(json.loads(sys.argv[1])["memory"])
+PY
+)
+          CONCURRENCY=$(python3 - <<'PY' '${{ steps.config.outputs.config }}'
+import json, sys
+print(json.loads(sys.argv[1])["concurrency"])
+PY
+)
+          TIMEOUT=$(python3 - <<'PY' '${{ steps.config.outputs.config }}'
+import json, sys
+print(json.loads(sys.argv[1])["timeout_seconds"])
+PY
+)
+          MIN_INSTANCES=$(python3 - <<'PY' '${{ steps.config.outputs.config }}'
+import json, sys
+print(json.loads(sys.argv[1])["min_instances"])
+PY
+)
+          MAX_INSTANCES=$(python3 - <<'PY' '${{ steps.config.outputs.config }}'
+import json, sys
+print(json.loads(sys.argv[1])["max_instances"])
+PY
+)
+          CPU_IDLE=$(python3 - <<'PY' '${{ steps.config.outputs.config }}'
+import json, sys
+print(str(json.loads(sys.argv[1])["cpu_idle"]).lower())
+PY
+)
+          RUNTIME_SA=$(python3 - <<'PY' '${{ steps.config.outputs.config }}'
+import json, sys
+print(json.loads(sys.argv[1])["runtime_service_account_email"])
+PY
+)
+          ALLOW_UNAUTH=$(python3 - <<'PY' '${{ steps.config.outputs.config }}'
+import json, sys
+print(str(json.loads(sys.argv[1])["allow_unauthenticated"]).lower())
+PY
+)
+
+          IMAGE="${{ inputs.artifact_region }}-docker.pkg.dev/${{ steps.envvars.outputs.project_id }}/${{ inputs.artifact_repository }}/${{ inputs.service }}@${{ steps.build.outputs.digest }}"
+
+          AUTH_FLAG="--no-allow-unauthenticated"
+          if [[ "$ALLOW_UNAUTH" == "true" ]]; then
+            AUTH_FLAG="--allow-unauthenticated"
+          fi
+
+          SECRET_FLAG_ARGS=()
+          if [[ -n "${{ steps.secret_bindings.outputs.bindings }}" ]]; then
+            SECRET_FLAG_ARGS+=(--set-secrets "${{ steps.secret_bindings.outputs.bindings }}")
+          fi
+
+          CPU_IDLE_FLAG="--no-cpu-throttling"
+          if [[ "$CPU_IDLE" == "true" ]]; then
+            CPU_IDLE_FLAG="--cpu-throttling"
+          fi
+
+          gcloud run deploy "$SERVICE_NAME" \
+            --project "${{ steps.envvars.outputs.project_id }}" \
+            --region "$REGION" \
+            --image "$IMAGE" \
+            --service-account "$RUNTIME_SA" \
+            --port "$PORT" \
+            --ingress "$INGRESS" \
+            --cpu "$CPU" \
+            --memory "$MEMORY" \
+            --concurrency "$CONCURRENCY" \
+            --timeout "$TIMEOUT" \
+            --min-instances "$MIN_INSTANCES" \
+            --max-instances "$MAX_INSTANCES" \
+            "$CPU_IDLE_FLAG" \
+            "$AUTH_FLAG" \
+            --env-vars-file cloud-run-env.yaml \
+            "${SECRET_FLAG_ARGS[@]}"

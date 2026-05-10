@@ -1,6 +1,8 @@
 package config
 
 import (
+	"strings"
+
 	"github.com/ctrlaltcloud008-hub/prj-apex-media-platform/internal/config"
 	"github.com/spf13/viper"
 )
@@ -18,7 +20,7 @@ type IngestionConfig struct {
 func LoadIngestionConfig() (*IngestionConfig, error) {
 
 	v := viper.New()
-	v.SetDefault("PORT", ":8080")
+	v.SetDefault("PORT", "8080")
 	v.SetDefault("APP_ENV", "local")
 	v.SetDefault("SERVICE", "ingestion")
 	v.SetDefault("REGION", "asia-south1")
@@ -31,7 +33,7 @@ func LoadIngestionConfig() (*IngestionConfig, error) {
 
 	cfg := &IngestionConfig{
 		appEnv:       v.GetString("APP_ENV"),
-		port:         v.GetString("PORT"),
+		port:         normalizePort(v.GetString("PORT")),
 		service:      v.GetString("SERVICE"),
 		region:       v.GetString("REGION"),
 		projectID:    v.GetString("PROJECT_ID"),
@@ -40,6 +42,17 @@ func LoadIngestionConfig() (*IngestionConfig, error) {
 	}
 
 	return cfg, nil
+}
+
+func normalizePort(port string) string {
+	port = strings.TrimSpace(port)
+	if port == "" {
+		return ":8080"
+	}
+	if strings.HasPrefix(port, ":") {
+		return port
+	}
+	return ":" + port
 }
 
 func (c *IngestionConfig) AppEnv() string    { return c.appEnv }

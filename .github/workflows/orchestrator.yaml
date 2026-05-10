@@ -1,0 +1,115 @@
+name: Monorepo Orchestrator
+
+on:
+  pull_request:
+    branches:
+      - develop
+      - main
+      - releases/**
+  push:
+    branches:
+      - develop
+      - main
+      - releases/**
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  GO_VERSION: "1.26.2"
+  ARTIFACT_REGION: asia-south1
+  ARTIFACT_REPOSITORY: apex-services
+
+jobs:
+  detect:
+    runs-on: ubuntu-24.04
+    outputs:
+      services: ${{ steps.services.outputs.services }}
+      matrix: ${{ steps.affected.outputs.matrix }}
+      has_changes: ${{ steps.affected.outputs.has_changes }}
+      environment: ${{ steps.environment.outputs.environment }}
+      project_secret: ${{ steps.environment.outputs.project_secret }}
+      wif_secret: ${{ steps.environment.outputs.wif_secret }}
+      sa_secret: ${{ steps.environment.outputs.sa_secret }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Determine target environment
+        id: environment
+        shell: bash
+        run: |
+          bash .github/scripts/set-env.sh "${GITHUB_REF}" >> "$GITHUB_OUTPUT"
+
+      - name: Discover services
+        id: services
+        shell: bash
+        run: |
+          SERVICES="$(bash .github/scripts/discover-services.sh)"
+          echo "services=$SERVICES" >> "$GITHUB_OUTPUT"
+
+      - name: Detect affected services
+        id: affected
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            BASE_REF="origin/${{ github.event.pull_request.base.ref }}"
+          else
+            if [[ "${{ github.event.before }}" == "0000000000000000000000000000000000000000" ]]; then
+              BASE_REF="HEAD^"
+            else
+              BASE_REF="${{ github.event.before }}"
+            fi
+          fi
+
+          MATRIX="$(bash .github/scripts/detect-affected-services.sh "$BASE_REF" HEAD '${{ steps.services.outputs.services }}')"
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          if [[ "$MATRIX" == '{"include":[]}' ]]; then
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  validate:
+    needs: detect
+    if: needs.detect.outputs.has_changes == 'true'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.detect.outputs.matrix) }}
+      max-parallel: 3
+    uses: ./.github/workflows/service-validate.yaml
+    with:
+      service: ${{ matrix.service }}
+      dockerfile: ${{ matrix.dockerfile }}
+      context: ${{ matrix.context }}
+      go_version: ${{ env.GO_VERSION }}
+
+  deploy:
+    needs: [detect, validate]
+    if: github.event_name == 'push' && needs.detect.outputs.has_changes == 'true' && needs.detect.outputs.environment != ''
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.detect.outputs.matrix) }}
+      max-parallel: 2
+    uses: ./.github/workflows/service-deploy.yaml
+    secrets: inherit
+    with:
+      service: ${{ matrix.service }}
+      dockerfile: ${{ matrix.dockerfile }}
+      deployfile: ${{ matrix.deployfile }}
+      context: ${{ matrix.context }}
+      go_version: ${{ env.GO_VERSION }}
+      artifact_region: ${{ env.ARTIFACT_REGION }}
+      artifact_repository: ${{ env.ARTIFACT_REPOSITORY }}
+      environment_name: ${{ needs.detect.outputs.environment }}
+      project_secret_name: ${{ needs.detect.outputs.project_secret }}
+      wif_secret_name: ${{ needs.detect.outputs.wif_secret }}
+      deploy_sa_secret_name: ${{ needs.detect.outputs.sa_secret }}

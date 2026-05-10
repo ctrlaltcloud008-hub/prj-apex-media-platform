@@ -1,0 +1,32 @@
+{
+  "platform": "cloud-run",
+  "kind": "service",
+  "service_name": "ingestion",
+  "region": "asia-south1",
+  "port": 8080,
+  "execution": {
+    "mode": "pubsub-pull"
+  },
+  "ingress": "internal",
+  "allow_unauthenticated": false,
+  "scaling": {
+    "min_instances": 1,
+    "max_instances": 4
+  },
+  "resources": {
+    "cpu": 1,
+    "memory": "1Gi",
+    "concurrency": 10,
+    "timeout_seconds": 900
+  },
+  "env": {
+    "SERVICE": "ingestion",
+    "REGION": "asia-south1",
+    "SUBSCRIPTION": "sub-ingestion"
+  },
+  "secret_env": {
+    "SPANNER_DATABASE": {
+      "secret": "ingestion-spanner-database"
+    }
+  }
+}

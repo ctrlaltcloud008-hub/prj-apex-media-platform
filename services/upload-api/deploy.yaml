@@ -1,0 +1,19 @@
+{
+  "platform": "cloud-run",
+  "kind": "service",
+  "service_name": "upload-api",
+  "region": "asia-south1",
+  "port": 8080,
+  "execution": { "mode": "http" },
+  "ingress": "internal-and-cloud-load-balancing",
+  "allow_unauthenticated": false,
+  "scaling": { "min_instances": 0, "max_instances": 3 },
+  "resources":
+    { "cpu": 1, "memory": "512Mi", "concurrency": 80, "timeout_seconds": 300 },
+  "env": { "SERVICE": "upload-api", "REGION": "asia-south1" },
+  "secret_env":
+    {
+      "SPANNER_DATABASE": { "secret": "upload-api-spanner-database" },
+      "BUCKETS_JSON": { "secret": "upload-api-buckets-json" },
+    },
+}
