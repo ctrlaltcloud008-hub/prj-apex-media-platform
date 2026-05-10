@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -48,7 +49,22 @@ def main() -> None:
     if not deployfile.exists():
         fail(f"missing deploy manifest for service '{service}' at {deployfile}")
 
-    data = json.loads(deployfile.read_text())
+    try:
+        result = subprocess.run(
+            [
+                "ruby",
+                "-e",
+                "require 'yaml'; require 'json'; puts JSON.generate(YAML.safe_load(File.read(ARGV[0]), permitted_classes: [], aliases: false))",
+                str(deployfile),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        fail(exc.stderr.strip() or exc.stdout.strip() or f"failed to parse YAML manifest {deployfile}")
+
+    data = json.loads(result.stdout)
 
     if data.get("platform") != "cloud-run":
         fail(f"{deployfile}: platform must be 'cloud-run'")

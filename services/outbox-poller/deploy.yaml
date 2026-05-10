@@ -1,34 +1,26 @@
-{
-  "platform": "cloud-run",
-  "kind": "service",
-  "service_name": "outbox-poller",
-  "region": "asia-south1",
-  "port": 8080,
-  "execution": {
-    "mode": "poller"
-  },
-  "ingress": "internal",
-  "allow_unauthenticated": false,
-  "scaling": {
-    "min_instances": 1,
-    "max_instances": 2
-  },
-  "resources": {
-    "cpu": 1,
-    "memory": "512Mi",
-    "concurrency": 10,
-    "timeout_seconds": 900
-  },
-  "env": {
-    "SERVICE": "outbox-poller",
-    "REGION": "asia-south1",
-    "BATCH_SIZE": "100",
-    "SHARD_COUNT": "16",
-    "POLL_INTERVAL_MS": "1000"
-  },
-  "secret_env": {
-    "SPANNER_DATABASE": {
-      "secret": "outbox-poller-spanner-database"
-    }
-  }
-}
+platform: cloud-run
+kind: service
+service_name: outbox-poller
+region: asia-south1
+port: 8080
+execution:
+  mode: poller
+ingress: internal
+allow_unauthenticated: false
+scaling:
+  min_instances: 1
+  max_instances: 2
+resources:
+  cpu: 1
+  memory: 512Mi
+  concurrency: 10
+  timeout_seconds: 900
+env:
+  SERVICE: outbox-poller
+  REGION: asia-south1
+  BATCH_SIZE: "100"
+  SHARD_COUNT: "16"
+  POLL_INTERVAL_MS: "1000"
+secret_env:
+  SPANNER_DATABASE:
+    secret: outbox-poller-spanner-database
