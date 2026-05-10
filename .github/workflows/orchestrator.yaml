@@ -24,8 +24,7 @@ permissions:
 env:
   GO_VERSION: "1.26.2"
   ARTIFACT_REGION: asia-south1
-  ARTIFACT_REPOSITORY: apex-services
-
+  ARTIFACT_REPOSITORY: prj-apex-artifact-registry
 jobs:
   detect:
     runs-on: ubuntu-24.04
