@@ -258,6 +258,5 @@ func run() error {
 		slog.String("component", "lifecycle"),
 		slog.Bool("clean_shutdown", runErr == nil),
 	)
-
 	return runErr
 }
