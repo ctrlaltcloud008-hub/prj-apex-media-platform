@@ -37,11 +37,22 @@ jobs:
       project_secret: ${{ steps.environment.outputs.project_secret }}
       wif_secret: ${{ steps.environment.outputs.wif_secret }}
       sa_secret: ${{ steps.environment.outputs.sa_secret }}
+      go_version: ${{ steps.constants.outputs.go_version }}
+      artifact_region: ${{ steps.constants.outputs.artifact_region }}
+      artifact_repository: ${{ steps.constants.outputs.artifact_repository }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
+
+      - name: Export workflow constants
+        id: constants
+        shell: bash
+        run: |
+          echo "go_version=${GO_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "artifact_region=${ARTIFACT_REGION}" >> "$GITHUB_OUTPUT"
+          echo "artifact_repository=${ARTIFACT_REPOSITORY}" >> "$GITHUB_OUTPUT"
 
       - name: Determine target environment
         id: environment
@@ -90,7 +101,7 @@ jobs:
       service: ${{ matrix.service }}
       dockerfile: ${{ matrix.dockerfile }}
       context: ${{ matrix.context }}
-      go_version: ${{ env.GO_VERSION }}
+      go_version: ${{ needs.detect.outputs.go_version }}
 
   deploy:
     needs: [detect, validate]
@@ -106,9 +117,9 @@ jobs:
       dockerfile: ${{ matrix.dockerfile }}
       deployfile: ${{ matrix.deployfile }}
       context: ${{ matrix.context }}
-      go_version: ${{ env.GO_VERSION }}
-      artifact_region: ${{ env.ARTIFACT_REGION }}
-      artifact_repository: ${{ env.ARTIFACT_REPOSITORY }}
+      go_version: ${{ needs.detect.outputs.go_version }}
+      artifact_region: ${{ needs.detect.outputs.artifact_region }}
+      artifact_repository: ${{ needs.detect.outputs.artifact_repository }}
       environment_name: ${{ needs.detect.outputs.environment }}
       project_secret_name: ${{ needs.detect.outputs.project_secret }}
       wif_secret_name: ${{ needs.detect.outputs.wif_secret }}
