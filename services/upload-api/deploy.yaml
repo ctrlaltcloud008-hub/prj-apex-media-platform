@@ -18,6 +18,9 @@ resources:
 env:
   SERVICE: upload-api
   REGION: asia-south1
+  OTEL_EXPORTER_OTLP_ENDPOINT: https://telemetry.googleapis.com
+  GOOGLE_CLOUD_QUOTA_PROJECT: "${PROJECT_ID}"
+  OTEL_RESOURCE_ATTRIBUTES: "gcp.project_id=${PROJECT_ID}"
 secret_env:
   SPANNER_DATABASE:
     secret: upload-api-spanner-database

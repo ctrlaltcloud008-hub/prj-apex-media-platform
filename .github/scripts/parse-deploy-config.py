@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -32,10 +33,19 @@ MODE_DEFAULTS = {
     },
 }
 
+PLACEHOLDER_PATTERN = re.compile(r"\$\{([A-Z0-9_]+)\}")
+
 
 def fail(message: str) -> None:
     print(message, file=sys.stderr)
     sys.exit(1)
+
+
+def interpolate_env_value(value: object, variables: dict[str, str]) -> object:
+    if not isinstance(value, str):
+        return value
+
+    return PLACEHOLDER_PATTERN.sub(lambda match: variables.get(match.group(1), match.group(0)), value)
 
 
 def main() -> None:
@@ -82,6 +92,15 @@ def main() -> None:
     secret_env = data.get("secret_env") or {}
     service_name = data.get("service_name", service)
     region = data.get("region", "asia-south1")
+
+    interpolation_vars = {
+        "APP_ENV": environment_name,
+        "PROJECT_ID": project_id,
+        "SERVICE": service_name,
+        "REGION": region,
+    }
+
+    env = {key: interpolate_env_value(value, interpolation_vars) for key, value in env.items()}
 
     env.setdefault("APP_ENV", environment_name)
     env.setdefault("PROJECT_ID", project_id)
