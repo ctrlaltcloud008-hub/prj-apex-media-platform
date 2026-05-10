@@ -127,70 +127,70 @@ jobs:
         shell: bash
         run: |
           SERVICE_NAME=$(python3 - <<'PY' '${{ steps.config.outputs.config }}'
-import json, sys
-print(json.loads(sys.argv[1])["service_name"])
-PY
-)
-          REGION=$(python3 - <<'PY' '${{ steps.config.outputs.config }}'
-import json, sys
-print(json.loads(sys.argv[1])["region"])
-PY
-)
-          PORT=$(python3 - <<'PY' '${{ steps.config.outputs.config }}'
-import json, sys
-print(json.loads(sys.argv[1])["port"])
-PY
-)
-          INGRESS=$(python3 - <<'PY' '${{ steps.config.outputs.config }}'
-import json, sys
-print(json.loads(sys.argv[1])["ingress"])
-PY
-)
-          CPU=$(python3 - <<'PY' '${{ steps.config.outputs.config }}'
-import json, sys
-print(json.loads(sys.argv[1])["cpu"])
-PY
-)
-          MEMORY=$(python3 - <<'PY' '${{ steps.config.outputs.config }}'
-import json, sys
-print(json.loads(sys.argv[1])["memory"])
-PY
-)
-          CONCURRENCY=$(python3 - <<'PY' '${{ steps.config.outputs.config }}'
-import json, sys
-print(json.loads(sys.argv[1])["concurrency"])
-PY
-)
-          TIMEOUT=$(python3 - <<'PY' '${{ steps.config.outputs.config }}'
-import json, sys
-print(json.loads(sys.argv[1])["timeout_seconds"])
-PY
-)
-          MIN_INSTANCES=$(python3 - <<'PY' '${{ steps.config.outputs.config }}'
-import json, sys
-print(json.loads(sys.argv[1])["min_instances"])
-PY
-)
-          MAX_INSTANCES=$(python3 - <<'PY' '${{ steps.config.outputs.config }}'
-import json, sys
-print(json.loads(sys.argv[1])["max_instances"])
-PY
-)
-          CPU_IDLE=$(python3 - <<'PY' '${{ steps.config.outputs.config }}'
-import json, sys
-print(str(json.loads(sys.argv[1])["cpu_idle"]).lower())
-PY
-)
-          RUNTIME_SA=$(python3 - <<'PY' '${{ steps.config.outputs.config }}'
-import json, sys
-print(json.loads(sys.argv[1])["runtime_service_account_email"])
-PY
-)
-          ALLOW_UNAUTH=$(python3 - <<'PY' '${{ steps.config.outputs.config }}'
-import json, sys
-print(str(json.loads(sys.argv[1])["allow_unauthenticated"]).lower())
-PY
-)
+          import json, sys
+          print(json.loads(sys.argv[1])["service_name"])
+          PY
+          )
+                    REGION=$(python3 - <<'PY' '${{ steps.config.outputs.config }}'
+          import json, sys
+          print(json.loads(sys.argv[1])["region"])
+          PY
+          )
+                    PORT=$(python3 - <<'PY' '${{ steps.config.outputs.config }}'
+          import json, sys
+          print(json.loads(sys.argv[1])["port"])
+          PY
+          )
+                    INGRESS=$(python3 - <<'PY' '${{ steps.config.outputs.config }}'
+          import json, sys
+          print(json.loads(sys.argv[1])["ingress"])
+          PY
+          )
+                    CPU=$(python3 - <<'PY' '${{ steps.config.outputs.config }}'
+          import json, sys
+          print(json.loads(sys.argv[1])["cpu"])
+          PY
+          )
+                    MEMORY=$(python3 - <<'PY' '${{ steps.config.outputs.config }}'
+          import json, sys
+          print(json.loads(sys.argv[1])["memory"])
+          PY
+          )
+                    CONCURRENCY=$(python3 - <<'PY' '${{ steps.config.outputs.config }}'
+          import json, sys
+          print(json.loads(sys.argv[1])["concurrency"])
+          PY
+          )
+                    TIMEOUT=$(python3 - <<'PY' '${{ steps.config.outputs.config }}'
+          import json, sys
+          print(json.loads(sys.argv[1])["timeout_seconds"])
+          PY
+          )
+                    MIN_INSTANCES=$(python3 - <<'PY' '${{ steps.config.outputs.config }}'
+          import json, sys
+          print(json.loads(sys.argv[1])["min_instances"])
+          PY
+          )
+                    MAX_INSTANCES=$(python3 - <<'PY' '${{ steps.config.outputs.config }}'
+          import json, sys
+          print(json.loads(sys.argv[1])["max_instances"])
+          PY
+          )
+                    CPU_IDLE=$(python3 - <<'PY' '${{ steps.config.outputs.config }}'
+          import json, sys
+          print(str(json.loads(sys.argv[1])["cpu_idle"]).lower())
+          PY
+          )
+                    RUNTIME_SA=$(python3 - <<'PY' '${{ steps.config.outputs.config }}'
+          import json, sys
+          print(json.loads(sys.argv[1])["runtime_service_account_email"])
+          PY
+          )
+                    ALLOW_UNAUTH=$(python3 - <<'PY' '${{ steps.config.outputs.config }}'
+          import json, sys
+          print(str(json.loads(sys.argv[1])["allow_unauthenticated"]).lower())
+          PY
+          )
 
           IMAGE="${{ inputs.artifact_region }}-docker.pkg.dev/${{ steps.envvars.outputs.project_id }}/${{ inputs.artifact_repository }}/${{ inputs.service }}@${{ steps.build.outputs.digest }}"
 
