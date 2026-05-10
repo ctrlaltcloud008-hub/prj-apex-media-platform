@@ -39,12 +39,13 @@ def fail(message: str) -> None:
 
 
 def main() -> None:
-    if len(sys.argv) != 4:
-        fail("usage: parse-deploy-config.py <deployfile> <service> <project_id>")
+    if len(sys.argv) != 5:
+        fail("usage: parse-deploy-config.py <deployfile> <service> <project_id> <environment_name>")
 
     deployfile = Path(sys.argv[1])
     service = sys.argv[2]
     project_id = sys.argv[3]
+    environment_name = sys.argv[4]
 
     if not deployfile.exists():
         fail(f"missing deploy manifest for service '{service}' at {deployfile}")
@@ -77,12 +78,19 @@ def main() -> None:
     defaults = MODE_DEFAULTS[mode]
     scaling = data.get("scaling") or {}
     resources = data.get("resources") or {}
-    env = data.get("env") or {}
+    env = dict(data.get("env") or {})
     secret_env = data.get("secret_env") or {}
+    service_name = data.get("service_name", service)
+    region = data.get("region", "asia-south1")
+
+    env.setdefault("APP_ENV", environment_name)
+    env.setdefault("PROJECT_ID", project_id)
+    env.setdefault("SERVICE", service_name)
+    env.setdefault("REGION", region)
 
     parsed = {
-        "service_name": data.get("service_name", service),
-        "region": data.get("region", "asia-south1"),
+        "service_name": service_name,
+        "region": region,
         "port": int(data.get("port", 8080)),
         "service_account": data.get("service_account") or f"apex-{service}",
         "ingress": data.get("ingress", defaults["ingress"]),

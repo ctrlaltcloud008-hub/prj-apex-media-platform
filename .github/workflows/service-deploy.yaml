@@ -76,7 +76,7 @@ jobs:
         id: config
         shell: bash
         run: |
-          CONFIG_JSON="$(python3 .github/scripts/parse-deploy-config.py '${{ inputs.deployfile }}' '${{ inputs.service }}' '${{ steps.envvars.outputs.project_id }}')"
+          CONFIG_JSON="$(python3 .github/scripts/parse-deploy-config.py '${{ inputs.deployfile }}' '${{ inputs.service }}' '${{ steps.envvars.outputs.project_id }}' '${{ inputs.environment_name }}')"
           echo "config=$CONFIG_JSON" >> "$GITHUB_OUTPUT"
 
       - name: Authenticate to Google Cloud
