@@ -64,6 +64,17 @@ func (p *Poller) Run(ctx context.Context, interval time.Duration) {
 		interval = time.Second
 	}
 
+	logger := p.logger.WithSpanContext(ctx)
+	logger.Info(
+		ctx,
+		"outbox.poller_loop_started",
+		"Started outbox poll loop",
+		slog.Duration("interval", interval),
+		slog.Int64("batch_size", p.batchSize),
+		slog.Int("assigned_shard_count", len(p.assignedShards)),
+		slog.Any("assigned_shards", p.assignedShards),
+	)
+
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -75,6 +86,12 @@ func (p *Poller) Run(ctx context.Context, interval time.Duration) {
 
 	runTick := func() {
 		if !running.CompareAndSwap(false, true) {
+			logger.Warn(
+				ctx,
+				"outbox.tick_skipped",
+				"Skipped outbox poll tick because the previous tick is still running",
+				slog.Int("assigned_shard_count", len(p.assignedShards)),
+			)
 			recordTickSkipped(ctx)
 			return
 		}
@@ -85,7 +102,7 @@ func (p *Poller) Run(ctx context.Context, interval time.Duration) {
 			defer running.Store(false)
 
 			if err := p.Poll(ctx); err != nil && ctx.Err() == nil {
-				p.logger.Error(ctx, "outbox.poll_failed", "Outbox poll failed", slog.String("error", err.Error()))
+				logger.Error(ctx, "outbox.poll_failed", "Outbox poll failed", slog.String("error", err.Error()))
 			}
 		}()
 	}
@@ -95,6 +112,7 @@ func (p *Poller) Run(ctx context.Context, interval time.Duration) {
 	for {
 		select {
 		case <-ctx.Done():
+			logger.Info(ctx, "outbox.poller_loop_stopped", "Stopped outbox poll loop", slog.String("reason", "context_canceled"))
 			return
 		case <-ticker.C:
 			runTick()
@@ -103,35 +121,169 @@ func (p *Poller) Run(ctx context.Context, interval time.Duration) {
 }
 
 func (p *Poller) Poll(ctx context.Context) error {
+	pollStart := time.Now()
+	ctx, span := p.tracer.Start(ctx, "outbox.poll",
+		trace.WithAttributes(
+			attribute.Int64("outbox.batch_size", p.batchSize),
+			attribute.Int("outbox.assigned_shard_count", len(p.assignedShards)),
+		),
+	)
+	defer span.End()
+
+	logger := p.logger.WithSpanContext(ctx)
+	logger.Info(
+		ctx,
+		"outbox.poll_started",
+		"Started outbox poll cycle",
+		slog.Int64("batch_size", p.batchSize),
+		slog.Int("assigned_shard_count", len(p.assignedShards)),
+		slog.Any("assigned_shards", p.assignedShards),
+	)
+
+	totalEntries := 0
+	totalPublished := 0
+	totalTopics := 0
+
+	defer func() {
+		span.SetAttributes(
+			attribute.Int("outbox.entries_read", totalEntries),
+			attribute.Int("outbox.entries_published", totalPublished),
+			attribute.Int("outbox.topic_group_count", totalTopics),
+		)
+		logger.Info(
+			ctx,
+			"outbox.poll_completed",
+			"Completed outbox poll cycle",
+			slog.Duration("duration", time.Since(pollStart)),
+			slog.Int("entries_read", totalEntries),
+			slog.Int("entries_published", totalPublished),
+			slog.Int("topic_group_count", totalTopics),
+		)
+	}()
+
 	for _, shardID := range p.assignedShards {
+		shardCtx, shardSpan := p.tracer.Start(ctx, "outbox.poll.shard",
+			trace.WithAttributes(attribute.Int64("outbox.shard_id", shardID)),
+		)
+		shardStart := time.Now()
 		rows, err := store.ReadPendingOutboxEntries(ctx, p.spanner, shardID, p.batchSize)
 		if err != nil {
+			shardSpan.RecordError(err)
+			shardSpan.SetStatus(otelcodes.Error, "read pending entries failed")
+			shardSpan.End()
+			span.RecordError(err)
+			span.SetStatus(otelcodes.Error, "read pending entries failed")
+			logger.Error(
+				ctx,
+				"outbox.shard_read_failed",
+				"Failed to read pending outbox entries for shard",
+				slog.Int64("shard_id", shardID),
+				slog.String("error", err.Error()),
+			)
 			return fmt.Errorf("read pending outbox entries for shard %d: %w", shardID, err)
 		}
+		totalEntries += len(rows)
+		shardSpan.SetAttributes(attribute.Int("outbox.entries_read", len(rows)))
 
 		if len(rows) == 0 {
+			shardSpan.AddEvent("outbox.shard.empty")
+			shardSpan.SetStatus(otelcodes.Ok, "no pending entries")
+			logger.Debug(
+				shardCtx,
+				"outbox.shard_empty",
+				"No pending outbox entries for shard",
+				slog.Int64("shard_id", shardID),
+			)
+			shardSpan.End()
 			continue
 		}
 
-		for topic, entries := range groupEntriesByTopic(rows) {
-			if err := p.publishTopicGroup(ctx, shardID, topic, entries); err != nil {
+		grouped := groupEntriesByTopic(rows)
+		totalTopics += len(grouped)
+		shardLogger := logger.WithSpanContext(shardCtx)
+		shardLogger.Info(
+			shardCtx,
+			"outbox.shard_loaded",
+			"Loaded pending outbox entries for shard",
+			slog.Int64("shard_id", shardID),
+			slog.Int("entry_count", len(rows)),
+			slog.Int("topic_group_count", len(grouped)),
+		)
+
+		shardPublished := 0
+		for topic, entries := range grouped {
+			publishedCount, err := p.publishTopicGroup(shardCtx, shardID, topic, entries)
+			if err != nil {
+				shardSpan.RecordError(err)
+				shardSpan.SetStatus(otelcodes.Error, "publish topic group failed")
+				span.RecordError(err)
+				span.SetStatus(otelcodes.Error, "publish topic group failed")
+				shardSpan.End()
 				return err
 			}
+			shardPublished += publishedCount
+			totalPublished += publishedCount
 		}
+
+		shardSpan.SetAttributes(attribute.Int("outbox.entries_published", shardPublished))
+		shardSpan.SetStatus(otelcodes.Ok, "shard processed")
+		shardLogger.Info(
+			shardCtx,
+			"outbox.shard_completed",
+			"Completed outbox shard poll",
+			slog.Int64("shard_id", shardID),
+			slog.Duration("duration", time.Since(shardStart)),
+			slog.Int("entry_count", len(rows)),
+			slog.Int("published_count", shardPublished),
+		)
+		shardSpan.End()
 	}
 
+	span.SetStatus(otelcodes.Ok, "poll cycle completed")
 	return nil
 }
 
-func (p *Poller) publishTopicGroup(ctx context.Context, shardID int64, topic string, entries []store.PendingOutboxEntry) error {
+func (p *Poller) publishTopicGroup(ctx context.Context, shardID int64, topic string, entries []store.PendingOutboxEntry) (int, error) {
+	groupCtx, groupSpan := p.tracer.Start(ctx, "outbox.publish.topic-group",
+		trace.WithAttributes(
+			attribute.String("messaging.system", "gcp_pubsub"),
+			attribute.String("messaging.destination.name", topic),
+			attribute.Int64("outbox.shard_id", shardID),
+			attribute.Int("outbox.entry_count", len(entries)),
+		),
+	)
+	defer groupSpan.End()
+
+	logger := p.logger.WithSpanContext(groupCtx)
+	logger.Info(
+		groupCtx,
+		"outbox.publish_started",
+		"Started publishing outbox topic batch",
+		slog.Int64("shard_id", shardID),
+		slog.String("topic", topic),
+		slog.Int("entry_count", len(entries)),
+	)
+
 	publishes := make([]pendingPublish, 0, len(entries))
 	for _, entry := range entries {
 		env, data, err := parsePayload(entry.Payload)
 		if err != nil {
-			return fmt.Errorf("parse payload for entry %s: %w", entry.EntryID, err)
+			groupSpan.RecordError(err)
+			groupSpan.SetStatus(otelcodes.Error, "parse payload failed")
+			logger.Error(
+				groupCtx,
+				"outbox.payload_parse_failed",
+				"Failed to parse outbox payload",
+				slog.Int64("shard_id", shardID),
+				slog.String("topic", topic),
+				slog.String("entry_id", entry.EntryID),
+				slog.String("video_id", entry.VideoID),
+				slog.String("error", err.Error()),
+			)
+			return 0, fmt.Errorf("parse payload for entry %s: %w", entry.EntryID, err)
 		}
 
-		publishCtx, span := p.startPublishSpan(ctx, shardID, topic, entry, env)
+		publishCtx, span := p.startPublishSpan(groupCtx, shardID, topic, entry, env)
 		result := p.publisher.PublishFromOutbox(publishCtx, topic, env, data, map[string]string{
 			"video_id": entry.VideoID,
 		})
@@ -146,13 +298,17 @@ func (p *Poller) publishTopicGroup(ctx context.Context, shardID int64, topic str
 
 	publishedEntryIDs := make([]string, 0, len(publishes))
 	for _, publish := range publishes {
-		_, err := publish.result.Get(ctx)
+		_, err := publish.result.Get(groupCtx)
 		if err != nil {
 			publish.span.RecordError(err)
 			publish.span.SetStatus(otelcodes.Error, "publish failed")
 			publish.span.End()
+			groupSpan.AddEvent("outbox.publish.entry_failed", trace.WithAttributes(
+				attribute.String("outbox.entry_id", publish.entryID),
+				attribute.String("video.id", publish.videoID),
+			))
 
-			p.logger.Error(ctx, "outbox.publish_failed", "Failed to publish outbox entry",
+			logger.Error(groupCtx, "outbox.publish_failed", "Failed to publish outbox entry",
 				slog.Int64("shard_id", shardID),
 				slog.String("topic", topic),
 				slog.String("entry_id", publish.entryID),
@@ -163,25 +319,49 @@ func (p *Poller) publishTopicGroup(ctx context.Context, shardID int64, topic str
 		}
 
 		publish.span.SetStatus(otelcodes.Ok, "")
+		publish.span.AddEvent("outbox.publish.entry_succeeded")
 		publish.span.End()
 		publishedEntryIDs = append(publishedEntryIDs, publish.entryID)
 	}
 
 	if len(publishedEntryIDs) == 0 {
-		return nil
+		groupSpan.SetAttributes(attribute.Int("outbox.entries_published", 0))
+		groupSpan.SetStatus(otelcodes.Ok, "no entries published")
+		logger.Warn(
+			groupCtx,
+			"outbox.publish_no_successes",
+			"Finished outbox topic batch without successful publishes",
+			slog.Int64("shard_id", shardID),
+			slog.String("topic", topic),
+			slog.Int("entry_count", len(entries)),
+		)
+		return 0, nil
 	}
 
-	if err := store.MarkOutboxEntriesPublished(ctx, p.spanner, publishedEntryIDs); err != nil {
-		return fmt.Errorf("mark published entries for shard %d topic %q: %w", shardID, topic, err)
+	if err := store.MarkOutboxEntriesPublished(groupCtx, p.spanner, publishedEntryIDs); err != nil {
+		groupSpan.RecordError(err)
+		groupSpan.SetStatus(otelcodes.Error, "mark published entries failed")
+		logger.Error(
+			groupCtx,
+			"outbox.mark_published_failed",
+			"Failed to mark outbox entries as published",
+			slog.Int64("shard_id", shardID),
+			slog.String("topic", topic),
+			slog.Int("count", len(publishedEntryIDs)),
+			slog.String("error", err.Error()),
+		)
+		return 0, fmt.Errorf("mark published entries for shard %d topic %q: %w", shardID, topic, err)
 	}
 
-	p.logger.Info(ctx, "outbox.publish_success", "Published outbox batch",
+	groupSpan.SetAttributes(attribute.Int("outbox.entries_published", len(publishedEntryIDs)))
+	groupSpan.SetStatus(otelcodes.Ok, "topic batch published")
+	logger.Info(groupCtx, "outbox.publish_success", "Published outbox batch",
 		slog.Int64("shard_id", shardID),
 		slog.String("topic", topic),
 		slog.Int("count", len(publishedEntryIDs)),
 	)
 
-	return nil
+	return len(publishedEntryIDs), nil
 }
 
 func groupEntriesByTopic(entries []store.PendingOutboxEntry) map[string][]store.PendingOutboxEntry {
