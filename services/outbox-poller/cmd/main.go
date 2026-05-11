@@ -272,7 +272,6 @@ func run() error {
 	)
 
 	return runErr
-
 }
 
 func allShards(n int) []int64 {
