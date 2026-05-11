@@ -32,7 +32,7 @@ func LoadOutboxPollerConfig() (*OutboxPollerConfig, error) {
 	v.SetDefault("SHARD_COUNT", 16)
 	v.SetDefault("POLL_INTERVAL_MS", 1000)
 
-	if err := config.LoadConfig(v, "outbox-poller"); err != nil {
+	if err := config.LoadConfig(v, "outbox"); err != nil {
 		return nil, err
 	}
 
