@@ -6,7 +6,7 @@ port: 8080
 execution:
   mode: http
   # ingress: internal-and-cloud-load-balancing
-  ingress: all
+ingress: all
 allow_unauthenticated: false
 scaling:
   min_instances: 0
