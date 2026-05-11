@@ -12,12 +12,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ctrlaltcloud008-hub/prj-apex-media-platform/internal/gcs"
 	"github.com/ctrlaltcloud008-hub/prj-apex-media-platform/internal/logging"
 	"github.com/ctrlaltcloud008-hub/prj-apex-media-platform/internal/otel"
 	pbclient "github.com/ctrlaltcloud008-hub/prj-apex-media-platform/internal/pubsub"
 	"github.com/ctrlaltcloud008-hub/prj-apex-media-platform/internal/spanner"
 	"github.com/ctrlaltcloud008-hub/prj-apex-media-platform/services/ingestion/internal/config"
-	"github.com/ctrlaltcloud008-hub/prj-apex-media-platform/internal/gcs"
 	"github.com/ctrlaltcloud008-hub/prj-apex-media-platform/services/ingestion/internal/handler"
 )
 
@@ -148,7 +148,5 @@ func run() error {
 	}
 
 	wg.Wait()
-
 	return runErr
-
 }
