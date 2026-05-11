@@ -19,6 +19,9 @@ env:
   SERVICE: ingestion
   REGION: asia-south1
   SUBSCRIPTION: sub-ingestion
+  OTEL_EXPORTER_OTLP_ENDPOINT: https://telemetry.googleapis.com
+  GOOGLE_CLOUD_QUOTA_PROJECT: "${PROJECT_ID}"
+  OTEL_RESOURCE_ATTRIBUTES: "gcp.project_id=${PROJECT_ID}"
 secret_env:
   SPANNER_DATABASE:
-    secret: ingestion-spanner-database
+    secret: upload-api-spanner-database

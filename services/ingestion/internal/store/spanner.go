@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"cloud.google.com/go/spanner"
 	"github.com/ctrlaltcloud008-hub/prj-apex-media-platform/internal/outbox"
@@ -16,14 +17,17 @@ import (
 var ErrValidationSkipped = errors.New("validation skipped")
 
 type ValidationResult struct {
-	VideoID      string
-	UserID       string
-	SourceBucket string
-	SourceObject string
-	SourceRegion string
-	Generation   int64
-	Meta         *metadata.VideoMetadata
-	Profile      string
+	VideoID           string
+	UserID            string
+	SourceBucket      string
+	SourceObject      string
+	SourceRegion      string
+	Generation        int64
+	Meta              *metadata.VideoMetadata
+	Profile           string
+	UploadCompletedAt time.Time
+	StartedAt         time.Time
+	CompletedAt       time.Time
 }
 
 type videoValidatedPayload struct {
@@ -74,7 +78,23 @@ func (r *ValidationResult) validate() error {
 	if r.Profile == "" {
 		return fmt.Errorf("profile cannot be empty")
 	}
+	if r.UploadCompletedAt.IsZero() {
+		return fmt.Errorf("uploadCompletedAt cannot be zero")
+	}
+	if r.StartedAt.IsZero() {
+		return fmt.Errorf("startedAt cannot be zero")
+	}
+	if r.CompletedAt.IsZero() {
+		return fmt.Errorf("completedAt cannot be zero")
+	}
+	if r.CompletedAt.Before(r.StartedAt) {
+		return fmt.Errorf("completedAt cannot be before startedAt")
+	}
 	return nil
+}
+
+func (r *ValidationResult) durationMs() int64 {
+	return r.CompletedAt.Sub(r.StartedAt).Milliseconds()
 }
 
 func (r *ValidationResult) sourceGCSURI() string {
@@ -128,11 +148,8 @@ func CommitValidation(ctx context.Context, client *spanner.Client, params *Valid
 			return nil
 		}
 
-		videoMutation := spanner.Update("videos",
-			[]string{"video_id", "status", "gcs_generation", "duration_ms", "source_width", "source_height", "source_codec", "source_fps", "is_hdr", "transcode_profile", "updated_at"},
-			[]any{params.VideoID, string(video.StatusValidated), params.Generation, params.Meta.DurationMs, params.Meta.Width, params.Meta.Height, params.Meta.Codec, params.Meta.FPS, params.Meta.IsHDR, params.Profile, spanner.CommitTimestamp},
-		)
-		if err := txn.BufferWrite([]*spanner.Mutation{videoMutation}); err != nil {
+		err = insertVideoRecord(ctx, txn, params)
+		if err != nil {
 			return fmt.Errorf("buffer video update: %w", err)
 		}
 
@@ -142,6 +159,49 @@ func CommitValidation(ctx context.Context, client *spanner.Client, params *Valid
 			Payload: buildVideoValidatedPayload(params),
 		}}); err != nil {
 			return fmt.Errorf("write outbox entry: %w", err)
+		}
+
+		err = completeUploadingStage(ctx, txn, params)
+		if err != nil {
+			return fmt.Errorf("complete uploading stage: %w", err)
+		}
+
+		err = video.InsertLifecycleEvent(ctx, txn, video.LifecycleEventParams{
+			VideoID:    params.VideoID,
+			EventSeq:   2,
+			FromStatus: video.StatusUploading,
+			ToStatus:   video.StatusValidating,
+			Actor:      "ingestion",
+			Reason:     "validation started",
+		})
+		if err != nil {
+			return fmt.Errorf("insert lifecycle event: %w", err)
+		}
+
+		err = video.InsertLifecycleEvent(ctx, txn, video.LifecycleEventParams{
+			VideoID:    params.VideoID,
+			EventSeq:   3,
+			FromStatus: video.StatusValidating,
+			ToStatus:   video.StatusValidated,
+			Actor:      "ingestion",
+			Reason:     "validation completed",
+		})
+		if err != nil {
+			return fmt.Errorf("insert lifecycle event: %w", err)
+		}
+
+		err = video.InsertVideoStageRecord(ctx, txn, video.StageRecordParams{
+			VideoID:     params.VideoID,
+			Stage:       video.StatusValidating,
+			Attempt:     1,
+			StartedAt:   spanner.NullTime{Time: params.StartedAt.UTC(), Valid: true},
+			CompletedAt: spanner.NullTime{Time: params.CompletedAt.UTC(), Valid: true},
+			DurationMs:  spanner.NullInt64{Int64: params.durationMs(), Valid: true},
+			Outcome:     spanner.NullString{StringVal: "SUCCESS", Valid: true},
+			Actor:       "ingestion",
+		})
+		if err != nil {
+			return fmt.Errorf("insert stage record: %w", err)
 		}
 
 		return nil
@@ -154,4 +214,37 @@ func CommitValidation(ctx context.Context, client *spanner.Client, params *Valid
 	}
 
 	return err
+}
+
+func completeUploadingStage(ctx context.Context, txn *spanner.ReadWriteTransaction, params *ValidationResult) error {
+	row, err := txn.ReadRow(ctx, "video_stages", spanner.Key{params.VideoID, string(video.StatusUploading), 1}, []string{"started_at"})
+	if err != nil {
+		return fmt.Errorf("read uploading stage: %w", err)
+	}
+
+	var startedAt time.Time
+	if err := row.ColumnByName("started_at", &startedAt); err != nil {
+		return fmt.Errorf("read uploading stage started_at: %w", err)
+	}
+
+	completedAt := params.UploadCompletedAt.UTC()
+	if completedAt.Before(startedAt) {
+		return fmt.Errorf("upload completed at %s before uploading stage start %s", completedAt.Format(time.RFC3339Nano), startedAt.Format(time.RFC3339Nano))
+	}
+
+	uploadingStageMutation := spanner.Update("video_stages",
+		[]string{"video_id", "stage", "attempt", "completed_at", "duration_ms", "outcome"},
+		[]any{params.VideoID, string(video.StatusUploading), 1, completedAt, completedAt.Sub(startedAt).Milliseconds(), spanner.NullString{StringVal: "SUCCEEDED", Valid: true}},
+	)
+
+	return txn.BufferWrite([]*spanner.Mutation{uploadingStageMutation})
+}
+
+func insertVideoRecord(ctx context.Context, txn *spanner.ReadWriteTransaction, params *ValidationResult) error {
+
+	videoMutation := spanner.Update("videos",
+		[]string{"video_id", "status", "gcs_generation", "duration_ms", "source_width", "source_height", "source_codec", "source_fps", "is_hdr", "transcode_profile", "updated_at"},
+		[]any{params.VideoID, string(video.StatusValidated), params.Generation, params.Meta.DurationMs, params.Meta.Width, params.Meta.Height, params.Meta.Codec, params.Meta.FPS, params.Meta.IsHDR, params.Profile, spanner.CommitTimestamp},
+	)
+	return txn.BufferWrite([]*spanner.Mutation{videoMutation})
 }

@@ -454,11 +454,39 @@ func (s *uploadService) executeSpannerTransaction(
 			return fmt.Errorf("%w: %w", ErrUploadServiceUnavailable, err)
 		}
 
-		if err := s.insertLifecycleEvent(ctx, txn, videoRecord.VideoID, "upload_created", ""); err != nil {
+		if err := video.InsertLifecycleEvent(ctx, txn, video.LifecycleEventParams{
+			VideoID:    videoRecord.VideoID,
+			EventSeq:   1,
+			FromStatus: nil,
+			ToStatus:   video.StatusUploading,
+			Actor:      "upload-api",
+			Reason:     "upload_created",
+		}); err != nil {
 			return fmt.Errorf("%w: %w", ErrUploadServiceUnavailable, err)
 		}
 
-		if err := s.insertVideoStageRecord(ctx, txn, videoRecord.VideoID); err != nil {
+		if err := video.InsertVideoStageRecord(ctx, txn, video.StageRecordParams{
+			VideoID: videoRecord.VideoID,
+			Stage:   video.StatusUploading,
+			Attempt: 1,
+			StartedAt: spanner.NullTime{
+				Time:  spanner.CommitTimestamp,
+				Valid: true,
+			},
+			CompletedAt: spanner.NullTime{
+				Valid: false,
+			},
+			DurationMs: spanner.NullInt64{
+				Valid: false,
+			},
+			Outcome: spanner.NullString{
+				Valid: false,
+			},
+			Actor: "upload-api",
+			ErrorID: spanner.NullString{
+				Valid: false,
+			},
+		}); err != nil {
 			return fmt.Errorf("%w: %w", ErrUploadServiceUnavailable, err)
 		}
 
@@ -638,25 +666,6 @@ func (s *uploadService) insertVideoRecord(ctx context.Context, txn *spanner.Read
 		[]any{videoRecord.VideoID, videoRecord.UserID, videoRecord.RequestID, videoRecord.Status,
 			videoRecord.SourceBucket, videoRecord.SourceObject,
 			videoRecord.GCSGeneration, videoRecord.MimeType, videoRecord.FileSizeBytes, spanner.CommitTimestamp, spanner.CommitTimestamp},
-	)
-
-	return txn.BufferWrite([]*spanner.Mutation{mutation})
-}
-
-func (s *uploadService) insertLifecycleEvent(ctx context.Context, txn *spanner.ReadWriteTransaction, videoID, eventType, details string) error {
-
-	mutation := spanner.Insert("video_lifecycle_events",
-		[]string{"video_id", "event_seq", "from_status", "to_status", "actor", "created_at"},
-		[]any{videoID, 1, nil, video.StatusUploading, "upload-api", spanner.CommitTimestamp},
-	)
-
-	return txn.BufferWrite([]*spanner.Mutation{mutation})
-}
-
-func (s *uploadService) insertVideoStageRecord(ctx context.Context, txn *spanner.ReadWriteTransaction, videoID string) error {
-	mutation := spanner.Insert("video_stages",
-		[]string{"video_id", "stage", "attempt", "started_at", "completed_at", "duration_ms", "actor", "outcome", "error_id"},
-		[]any{videoID, video.StatusUploading, 1, spanner.CommitTimestamp, nil, nil, "upload-api", nil, nil},
 	)
 
 	return txn.BufferWrite([]*spanner.Mutation{mutation})

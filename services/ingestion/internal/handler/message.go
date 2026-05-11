@@ -22,6 +22,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	otelcodes "go.opentelemetry.io/otel/codes"
 	metricapi "go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc/codes"
 )
 
@@ -47,37 +48,98 @@ func NewHandler(logger *logging.Logger,
 	}
 }
 
+type messageProcessor struct {
+	handler       *Handler
+	msg           *pubsub.Message
+	metric        ingestionTelemetry
+	startedAt     time.Time
+	ctx           context.Context
+	span          trace.Span
+	logger        *logging.Logger
+	finalStatus   string
+	failureReason string
+	payload       *event.Message
+	userID        string
+	videoID       string
+	generation    int64
+	videoMetadata *metadata.VideoMetadata
+	profile       string
+}
+
+func newMessageProcessor(h *Handler, ctx context.Context, msg *pubsub.Message) *messageProcessor {
+	ctx, span := pbclient.StartConsumerSpan(ctx, msg, "ingestion.process")
+
+	return &messageProcessor{
+		handler:   h,
+		msg:       msg,
+		metric:    getTelemetry(),
+		startedAt: time.Now(),
+		ctx:       ctx,
+		span:      span,
+		logger:    h.logger.WithSpanContext(ctx),
+	}
+}
+
 func (h *Handler) Start(ctx context.Context) error {
 	h.logger.Info(ctx, "handler.starting", "Starting message handler")
 	return h.subscriber.Receive(ctx, h.handleMessage)
 }
 
 func (h *Handler) handleMessage(ctx context.Context, msg *pubsub.Message) {
-	startedAt := time.Now()
-	metric := getTelemetry()
-	finalStatus := ""
-	failureReason := ""
+	processor := newMessageProcessor(h, ctx, msg)
+	processor.process()
+}
 
-	ctx, span := pbclient.StartConsumerSpan(ctx, msg, "ingestion.process")
-	defer span.End()
-	defer recordProcessingMetrics(ctx, startedAt, h.sourceRegion, finalStatus, failureReason)
+func (p *messageProcessor) process() {
+	processingCtx := p.ctx
 
-	logger := h.logger.WithSpanContext(ctx)
-	logger.Info(ctx, "pubsub.message_received", "Received message")
+	defer p.span.End()
+	defer recordProcessingMetrics(processingCtx, p.startedAt, p.handler.sourceRegion, p.finalStatus, p.failureReason)
 
-	parseCtx, parseSpan := startStageSpan(ctx, "ingestion.parse-message")
-	payload, err := event.ParseGCSFinalizeMessage(msg)
+	p.logger.Info(p.ctx, "pubsub.message_received", "Received message")
+
+	if !p.parsePayload() {
+		return
+	}
+	if !p.validateObject() {
+		return
+	}
+	if !p.loadVideoContext() {
+		return
+	}
+	if !p.checkDuplicateOrInvalidStatus() {
+		return
+	}
+
+	signedURL, ok := p.generateSignedURL()
+	if !ok {
+		return
+	}
+	if !p.extractMetadata(signedURL) {
+		return
+	}
+	if !p.selectProfile() {
+		return
+	}
+	if !p.commitValidation() {
+		return
+	}
+
+	p.completeValidation()
+}
+
+func (p *messageProcessor) parsePayload() bool {
+	parseCtx, parseSpan := startStageSpan(p.ctx, "ingestion.parse-message")
+	payload, err := event.ParseGCSFinalizeMessage(p.msg)
 	if err != nil {
 		recordSpanError(parseSpan, err, "failed to parse gcs finalize message")
 		parseSpan.End()
-		span.RecordError(err)
-		span.SetStatus(otelcodes.Error, "failed to parse gcs finalize message")
-		finalStatus = "failed"
-		failureReason = "message_parse"
-		logger.Error(ctx, "pubsub.message_parse_error", "Failed to parse message", slog.String("error", err.Error()))
-		msg.Ack()
-		return
+		p.failProcessing(err, "failed to parse gcs finalize message", "message_parse")
+		p.logger.Error(p.ctx, "pubsub.message_parse_error", "Failed to parse message", slog.String("error", err.Error()))
+		p.msg.Ack()
+		return false
 	}
+
 	parseSpan.SetAttributes(
 		attribute.String("messaging.message.id", payload.MessageID),
 		attribute.String("storage.bucket", payload.Notification.Bucket),
@@ -86,102 +148,172 @@ func (h *Handler) handleMessage(ctx context.Context, msg *pubsub.Message) {
 		attribute.Int64("storage.object.generation", payload.Notification.Generation),
 	)
 	parseSpan.End()
-	ctx = parseCtx
-	metric.fileSizeBytes.Record(ctx, payload.Notification.Size, metricapi.WithAttributes(attribute.String("content_type", payload.Notification.ContentType)))
 
-	validateCtx, validateSpan := startStageSpan(ctx,
-		"ingestion.validate-gcs",
-		attribute.String("storage.bucket", payload.Notification.Bucket),
-		attribute.String("storage.object", payload.Notification.Name),
-		attribute.Int64("storage.object.size", payload.Notification.Size),
+	p.ctx = parseCtx
+	p.payload = payload
+	p.metric.fileSizeBytes.Record(
+		p.ctx,
+		payload.Notification.Size,
+		metricapi.WithAttributes(attribute.String("content_type", payload.Notification.ContentType)),
 	)
-	exists, err := h.gcsClient.CheckObjectExists(validateCtx, payload.Notification.Bucket, payload.Notification.Name, payload.Notification.Size)
+
+	return true
+}
+
+func (p *messageProcessor) validateObject() bool {
+	notification := p.payload.Notification
+	validateCtx, validateSpan := startStageSpan(
+		p.ctx,
+		"ingestion.validate-gcs",
+		attribute.String("storage.bucket", notification.Bucket),
+		attribute.String("storage.object", notification.Name),
+		attribute.Int64("storage.object.size", notification.Size),
+	)
+
+	exists, err := p.handler.gcsClient.CheckObjectExists(validateCtx, notification.Bucket, notification.Name, notification.Size)
 	if err != nil {
 		recordSpanError(validateSpan, err, "failed to validate gcs object")
 		validateSpan.End()
-		span.RecordError(err)
-		span.SetStatus(otelcodes.Error, "failed to validate gcs object")
-		finalStatus = "failed"
-		failureReason = "gcs_validation"
-		logger.Error(ctx, "pubsub.validation_error", "Failed to validate object existence", slog.String("bucket", payload.Notification.Bucket), slog.String("object", payload.Notification.Name), slog.String("error", err.Error()))
-		msg.Ack()
-		return
+		p.failProcessing(err, "failed to validate gcs object", "gcs_validation")
+		p.logger.Error(
+			p.ctx,
+			"pubsub.validation_error",
+			"Failed to validate object existence",
+			slog.String("bucket", notification.Bucket),
+			slog.String("object", notification.Name),
+			slog.String("error", err.Error()),
+		)
+		p.msg.Ack()
+		return false
 	}
 
 	if !exists {
 		validateSpan.SetStatus(otelcodes.Error, "gcs object not found")
 		validateSpan.End()
-		span.SetStatus(otelcodes.Error, "gcs object not found")
-		finalStatus = "failed"
-		failureReason = "object_not_found"
-		logger.Error(ctx, "pubsub.object_not_found", "Object does not exist in GCS", slog.String("bucket", payload.Notification.Bucket), slog.String("object", payload.Notification.Name))
-		msg.Ack()
-		return
+		p.failProcessing(nil, "gcs object not found", "object_not_found")
+		p.logger.Error(
+			p.ctx,
+			"pubsub.object_not_found",
+			"Object does not exist in GCS",
+			slog.String("bucket", notification.Bucket),
+			slog.String("object", notification.Name),
+		)
+		p.msg.Ack()
+		return false
 	}
-	validateSpan.End()
-	ctx = validateCtx
 
-	userID, videoID, err := validation.ParseObjectPath(payload.Notification.Name)
+	validateSpan.End()
+	p.ctx = validateCtx
+
+	return true
+}
+
+func (p *messageProcessor) loadVideoContext() bool {
+	userID, videoID, err := validation.ParseObjectPath(p.payload.Notification.Name)
 	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(otelcodes.Error, "failed to parse object path")
-		finalStatus = "failed"
-		failureReason = "invalid_object_path"
-		logger.Error(ctx,
+		p.failProcessing(err, "failed to parse object path", "invalid_object_path")
+		p.logger.Error(
+			p.ctx,
 			"pubsub.invalid_object_path",
 			"Failed to parse object path",
-			slog.String("objectPath", payload.Notification.Name),
-			slog.String("error", err.Error()))
-		msg.Ack()
-		return
+			slog.String("objectPath", p.payload.Notification.Name),
+			slog.String("error", err.Error()),
+		)
+		p.msg.Ack()
+		return false
 	}
 
-	logger = logger.WithVideoID(videoID)
-	generation := payload.Notification.Generation
-	span.SetAttributes(
+	p.userID = userID
+	p.videoID = videoID
+	p.generation = p.payload.Notification.Generation
+	p.logger = p.logger.WithVideoID(videoID)
+	p.span.SetAttributes(
 		attribute.String("video_id", videoID),
 		attribute.String("user_id", userID),
-		attribute.String("region", h.sourceRegion),
-		attribute.String("storage.bucket", payload.Notification.Bucket),
-		attribute.String("storage.object", payload.Notification.Name),
-		attribute.Int64("generation", generation),
+		attribute.String("region", p.handler.sourceRegion),
+		attribute.String("storage.bucket", p.payload.Notification.Bucket),
+		attribute.String("storage.object", p.payload.Notification.Name),
+		attribute.Int64("generation", p.generation),
 	)
-	dedupCtx, dedupSpan := startStageSpan(ctx,
+
+	return true
+}
+
+func (p *messageProcessor) checkDuplicateOrInvalidStatus() bool {
+	dedupCtx, dedupSpan := startStageSpan(
+		p.ctx,
 		"ingestion.dedup-check",
-		attribute.String("video_id", videoID),
-		attribute.Int64("generation", generation),
+		attribute.String("video_id", p.videoID),
+		attribute.Int64("generation", p.generation),
 	)
+
+	shouldContinue, err := p.shouldContinueProcessing(dedupCtx, dedupSpan)
+	if err != nil {
+		recordSpanError(dedupSpan, err, "failed to check gcs generation")
+		dedupSpan.End()
+		p.failProcessing(err, "failed to check gcs generation", "generation_check")
+		p.logger.Error(
+			p.ctx,
+			"pubsub.generation_check_failed",
+			"Failed to check GCS generation or video status",
+			slog.Int64("generation", p.generation),
+			slog.String("error", err.Error()),
+		)
+		p.msg.Nack()
+		return false
+	}
+
+	dedupSpan.End()
+	p.ctx = dedupCtx
+	if !shouldContinue {
+		p.finalStatus = "dedup"
+		p.msg.Ack()
+		return false
+	}
+
+	return true
+}
+
+func (p *messageProcessor) shouldContinueProcessing(ctx context.Context, dedupSpan trace.Span) (bool, error) {
 	shouldContinue := true
 
-	_, err = spannerutil.RunRW(dedupCtx, h.spanner, func(ctx context.Context, tx *spanner.ReadWriteTransaction) error {
-		duplicate, err := idempotency.CheckGCSGeneration(ctx, tx, videoID, generation)
+	_, err := spannerutil.RunRW(ctx, p.handler.spanner, func(ctx context.Context, tx *spanner.ReadWriteTransaction) error {
+		duplicate, err := idempotency.CheckGCSGeneration(ctx, tx, p.videoID, p.generation)
 		if err != nil {
 			return fmt.Errorf("check gcs generation: %w", err)
 		}
 		if duplicate {
 			shouldContinue = false
-			dedupSpan.SetAttributes(attribute.Bool("ingestion.is_duplicate", true), attribute.String("ingestion.dedup_reason", "generation_match"))
-			logger.Info(ctx,
+			dedupSpan.SetAttributes(
+				attribute.Bool("ingestion.is_duplicate", true),
+				attribute.String("ingestion.dedup_reason", "generation_match"),
+			)
+			p.logger.Info(
+				ctx,
 				"pubsub.duplicate_generation",
 				"Skipping duplicate GCS finalize event",
-				slog.Int64("generation", generation),
+				slog.Int64("generation", p.generation),
 			)
 			return nil
 		}
 
-		// Check Status != UPLOADING
-		row, err := tx.ReadRow(ctx, "videos", spanner.Key{videoID}, []string{"status"})
+		row, err := tx.ReadRow(ctx, "videos", spanner.Key{p.videoID}, []string{"status"})
 		if err != nil {
 			if spanner.ErrCode(err) == codes.NotFound {
 				shouldContinue = false
-				dedupSpan.SetAttributes(attribute.Bool("ingestion.is_duplicate", true), attribute.String("ingestion.dedup_reason", "video_not_found"))
-				logger.Warn(ctx,
+				dedupSpan.SetAttributes(
+					attribute.Bool("ingestion.is_duplicate", true),
+					attribute.String("ingestion.dedup_reason", "video_not_found"),
+				)
+				p.logger.Warn(
+					ctx,
 					"pubsub.video_not_found",
 					"Video record not found in database, skipping message",
-					slog.String("videoID", videoID),
+					slog.String("videoID", p.videoID),
 				)
-				return nil // No record found, skip processing
+				return nil
 			}
+
 			return fmt.Errorf("read video record: %w", err)
 		}
 
@@ -192,87 +324,82 @@ func (h *Handler) handleMessage(ctx context.Context, msg *pubsub.Message) {
 
 		if status != "UPLOADING" {
 			shouldContinue = false
-			dedupSpan.SetAttributes(attribute.Bool("ingestion.is_duplicate", true), attribute.String("ingestion.dedup_reason", "invalid_status"), attribute.String("video.status", status))
-			logger.Error(ctx,
+			dedupSpan.SetAttributes(
+				attribute.Bool("ingestion.is_duplicate", true),
+				attribute.String("ingestion.dedup_reason", "invalid_status"),
+				attribute.String("video.status", status),
+			)
+			p.logger.Error(
+				ctx,
 				"pubsub.invalid_video_status",
 				"Received GCS finalize event for video that is not in UPLOADING status",
-				slog.String("videoID", videoID),
+				slog.String("videoID", p.videoID),
 				slog.String("status", status),
 			)
 			return nil
 		}
 
-		// Continue with your normal write path here.
-		// This is where you should also update videos.gcs_generation = generation
-		// so future retries can be deduplicated.
 		dedupSpan.SetAttributes(attribute.Bool("ingestion.is_duplicate", false))
 		return nil
 	})
-	if err != nil {
-		recordSpanError(dedupSpan, err, "failed to check gcs generation")
-		dedupSpan.End()
-		span.RecordError(err)
-		span.SetStatus(otelcodes.Error, "failed to check gcs generation")
-		finalStatus = "failed"
-		failureReason = "generation_check"
-		logger.Error(ctx,
-			"pubsub.generation_check_failed",
-			"Failed to check GCS generation or video status",
-			slog.Int64("generation", generation),
-			slog.String("error", err.Error()),
-		)
-		msg.Nack()
-		return
-	}
-	dedupSpan.End()
-	ctx = dedupCtx
-	if !shouldContinue {
-		finalStatus = "dedup"
-		msg.Ack()
-		return
-	}
 
-	url, err := h.gcsClient.GenerateSignedURL(ctx, payload.Notification.Bucket, payload.Notification.Name)
+	return shouldContinue, err
+}
+
+func (p *messageProcessor) generateSignedURL() (string, bool) {
+	notification := p.payload.Notification
+	url, err := p.handler.gcsClient.GenerateSignedURL(p.ctx, notification.Bucket, notification.Name)
 	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(otelcodes.Error, "failed to generate signed url")
-		finalStatus = "failed"
-		failureReason = "signed_url"
-		logger.Error(ctx,
+		p.failProcessing(err, "failed to generate signed url", "signed_url")
+		p.logger.Error(
+			p.ctx,
 			"pubsub.signed_url_error",
 			"Failed to generate signed URL for GCS object",
-			slog.String("bucket", payload.Notification.Bucket),
-			slog.String("object", payload.Notification.Name),
+			slog.String("bucket", notification.Bucket),
+			slog.String("object", notification.Name),
 			slog.String("error", err.Error()),
 		)
-		msg.Nack()
-		return
+		p.msg.Nack()
+		return "", false
 	}
 
+	return url, true
+}
+
+func (p *messageProcessor) extractMetadata(signedURL string) bool {
 	ffprobeStartedAt := time.Now()
-	ffprobeCtx, ffprobeSpan := startStageSpan(ctx,
+	ffprobeCtx, ffprobeSpan := startStageSpan(
+		p.ctx,
 		"ingestion.ffprobe",
-		attribute.String("video_id", videoID),
+		attribute.String("video_id", p.videoID),
 	)
-	videoMetadata, err := metadata.ExtractMetadata(ffprobeCtx, url)
+
+	videoMetadata, err := metadata.ExtractMetadata(ffprobeCtx, signedURL)
 	if err != nil {
-		metric.ffprobeDuration.Record(ffprobeCtx, time.Since(ffprobeStartedAt).Seconds(), metricapi.WithAttributes(attribute.String("region", h.sourceRegion), attribute.String("outcome", "error")))
+		p.metric.ffprobeDuration.Record(
+			ffprobeCtx,
+			time.Since(ffprobeStartedAt).Seconds(),
+			metricapi.WithAttributes(attribute.String("region", p.handler.sourceRegion), attribute.String("outcome", "error")),
+		)
 		recordSpanError(ffprobeSpan, err, "failed to extract metadata")
 		ffprobeSpan.End()
-		span.RecordError(err)
-		span.SetStatus(otelcodes.Error, "failed to extract metadata")
-		finalStatus = "failed"
-		failureReason = "metadata_extraction"
-		logger.Error(ctx,
+		p.failProcessing(err, "failed to extract metadata", "metadata_extraction")
+		p.logger.Error(
+			p.ctx,
 			"pubsub.metadata_extraction_failed",
 			"Failed to extract metadata from video",
-			slog.String("videoID", videoID),
+			slog.String("videoID", p.videoID),
 			slog.String("error", err.Error()),
 		)
-		msg.Nack()
-		return
+		p.msg.Nack()
+		return false
 	}
-	metric.ffprobeDuration.Record(ffprobeCtx, time.Since(ffprobeStartedAt).Seconds(), metricapi.WithAttributes(attribute.String("region", h.sourceRegion), attribute.String("outcome", "success")))
+
+	p.metric.ffprobeDuration.Record(
+		ffprobeCtx,
+		time.Since(ffprobeStartedAt).Seconds(),
+		metricapi.WithAttributes(attribute.String("region", p.handler.sourceRegion), attribute.String("outcome", "success")),
+	)
 	ffprobeSpan.SetAttributes(
 		attribute.Int64("duration_ms", videoMetadata.DurationMs),
 		attribute.Int("width", videoMetadata.Width),
@@ -280,97 +407,142 @@ func (h *Handler) handleMessage(ctx context.Context, msg *pubsub.Message) {
 		attribute.String("codec", videoMetadata.Codec),
 	)
 	ffprobeSpan.End()
-	ctx = ffprobeCtx
 
-	profileCtx, profileSpan := startStageSpan(ctx,
+	p.ctx = ffprobeCtx
+	p.videoMetadata = videoMetadata
+
+	return true
+}
+
+func (p *messageProcessor) selectProfile() bool {
+	profileCtx, profileSpan := startStageSpan(
+		p.ctx,
 		"ingestion.select-profile",
-		attribute.String("video_id", videoID),
+		attribute.String("video_id", p.videoID),
 	)
-	selectedProfile, err := profile.SelectTranscodeProfile(videoMetadata)
+
+	selectedProfile, err := profile.SelectTranscodeProfile(p.videoMetadata)
 	if err != nil {
 		recordSpanError(profileSpan, err, "failed to select transcode profile")
 		profileSpan.End()
-		span.RecordError(err)
-		span.SetStatus(otelcodes.Error, "failed to select transcode profile")
-		finalStatus = "failed"
-		failureReason = "profile_selection"
-		logger.Error(ctx,
+		p.failProcessing(err, "failed to select transcode profile", "profile_selection")
+		p.logger.Error(
+			p.ctx,
 			"pubsub.profile_selection_failed",
 			"Failed to select transcode profile from metadata",
 			slog.String("error", err.Error()),
 		)
-		msg.Nack()
-		return
+		p.msg.Nack()
+		return false
 	}
-	metric.profileSelectedTotal.Add(profileCtx, 1, metricapi.WithAttributes(attribute.String("profile", selectedProfile)))
+
+	p.metric.profileSelectedTotal.Add(
+		profileCtx,
+		1,
+		metricapi.WithAttributes(attribute.String("profile", selectedProfile)),
+	)
 	profileSpan.SetAttributes(attribute.String("profile", selectedProfile))
 	profileSpan.End()
-	ctx = profileCtx
 
-	logger.Info(ctx,
+	p.ctx = profileCtx
+	p.profile = selectedProfile
+	p.logger.Info(
+		p.ctx,
 		"pubsub.profile_selected",
 		"Selected transcode profile",
 		slog.String("profile", selectedProfile),
-		slog.Int("width", videoMetadata.Width),
-		slog.Int("height", videoMetadata.Height),
-		slog.Float64("fps", videoMetadata.FPS),
-		slog.Bool("is_hdr", videoMetadata.IsHDR),
+		slog.Int("width", p.videoMetadata.Width),
+		slog.Int("height", p.videoMetadata.Height),
+		slog.Float64("fps", p.videoMetadata.FPS),
+		slog.Bool("is_hdr", p.videoMetadata.IsHDR),
 	)
 
-	result := &store.ValidationResult{
-		VideoID:      videoID,
-		UserID:       userID,
-		SourceBucket: payload.Notification.Bucket,
-		SourceObject: payload.Notification.Name,
-		SourceRegion: h.sourceRegion,
-		Generation:   generation,
-		Meta:         videoMetadata,
-		Profile:      selectedProfile,
-	}
+	return true
+}
 
-	commitCtx, commitSpan := startStageSpan(ctx,
+func (p *messageProcessor) commitValidation() bool {
+	commitCtx, commitSpan := startStageSpan(
+		p.ctx,
 		"spanner.read-write-tx",
-		attribute.String("video_id", videoID),
-		attribute.String("profile", selectedProfile),
+		attribute.String("video_id", p.videoID),
+		attribute.String("profile", p.profile),
 	)
-	err = store.CommitValidation(commitCtx, h.spanner, result)
+
+	err := store.CommitValidation(commitCtx, p.handler.spanner, p.validationResult())
 	if err != nil {
 		if errors.Is(err, store.ErrValidationSkipped) {
 			commitSpan.SetAttributes(attribute.Bool("ingestion.validation_skipped", true))
 			commitSpan.End()
-			finalStatus = "dedup"
-			logger.Info(ctx,
+			p.finalStatus = "dedup"
+			p.logger.Info(
+				p.ctx,
 				"pubsub.validation_skipped",
 				"Skipped validation commit",
 				slog.String("reason", err.Error()),
 			)
-			msg.Ack()
-			return
+			p.msg.Ack()
+			return false
 		}
 
 		recordSpanError(commitSpan, err, "failed to commit validation result")
 		commitSpan.End()
-		span.RecordError(err)
-		span.SetStatus(otelcodes.Error, "failed to commit validation result")
-		finalStatus = "failed"
-		failureReason = "validation_commit"
-		logger.Error(ctx,
+		p.failProcessing(err, "failed to commit validation result", "validation_commit")
+		p.logger.Error(
+			p.ctx,
 			"pubsub.validation_commit_failed",
 			"Failed to commit validation result",
 			slog.String("error", err.Error()),
 		)
-		msg.Nack()
-		return
+		p.msg.Nack()
+		return false
 	}
+
 	commitSpan.End()
-	finalStatus = "validated"
-	span.SetStatus(otelcodes.Ok, "validated")
-	logger.Info(ctx,
+	p.ctx = commitCtx
+
+	return true
+}
+
+func (p *messageProcessor) validationResult() *store.ValidationResult {
+	uploadCompletedAt := p.payload.PublishTime
+	if timeCreated, err := time.Parse(time.RFC3339, p.payload.Notification.TimeCreated); err == nil {
+		uploadCompletedAt = timeCreated
+	}
+
+	return &store.ValidationResult{
+		VideoID:      p.videoID,
+		UserID:       p.userID,
+		SourceBucket: p.payload.Notification.Bucket,
+		SourceObject: p.payload.Notification.Name,
+		SourceRegion: p.handler.sourceRegion,
+		Generation:   p.generation,
+		Meta:         p.videoMetadata,
+		Profile:      p.profile,
+		UploadCompletedAt: uploadCompletedAt,
+		StartedAt:    p.startedAt,
+		CompletedAt:  time.Now(),
+	}
+}
+
+func (p *messageProcessor) completeValidation() {
+	p.finalStatus = "validated"
+	p.span.SetStatus(otelcodes.Ok, "validated")
+	p.logger.Info(
+		p.ctx,
 		"pubsub.validation_success",
 		"Successfully validated video and committed result to database",
-		slog.String("videoID", videoID),
-		slog.String("profile", selectedProfile),
+		slog.String("videoID", p.videoID),
+		slog.String("profile", p.profile),
 	)
+	p.msg.Ack()
+}
 
-	msg.Ack()
+func (p *messageProcessor) failProcessing(err error, description, reason string) {
+	if err != nil {
+		p.span.RecordError(err)
+	}
+
+	p.span.SetStatus(otelcodes.Error, description)
+	p.finalStatus = "failed"
+	p.failureReason = reason
 }
