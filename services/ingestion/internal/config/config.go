@@ -27,7 +27,7 @@ func LoadIngestionConfig() (*IngestionConfig, error) {
 	v.SetDefault("PROJECT_ID", "apex-494315")
 	v.SetDefault("SPANNER_DATABASE", "")
 
-	if err := config.LoadConfig(v, "ingestion"); err != nil {
+	if err := config.LoadConfig(v, "ingestion-service"); err != nil {
 		return nil, err
 	}
 
