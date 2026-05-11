@@ -217,7 +217,6 @@ func Upload(logger *logging.Logger, uploadService services.UploadService) http.H
 			MaxFileSizeBytes:    response.MaxFileSizeBytes,
 			AllowedContentTypes: validation.AllowedContentTypesList(),
 		}
-
 		writeJSON(w, http.StatusCreated, payload)
 	}
 }
