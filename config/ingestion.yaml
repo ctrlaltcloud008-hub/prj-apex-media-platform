@@ -1,7 +1,0 @@
-APP_ENV: development
-PORT: ":8080"
-SERVICE: ingestion
-REGION: asia-south1
-PROJECT_ID: apex-494315
-SPANNER_DATABASE: projects/apex-494315/instances/videopipeline/databases/videopipeline-db
-SUBSCRIPTION: sub-ingestion
