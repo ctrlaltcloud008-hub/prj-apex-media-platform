@@ -457,7 +457,6 @@ func (s *uploadService) executeSpannerTransaction(
 		if err := video.InsertLifecycleEvent(ctx, txn, video.LifecycleEventParams{
 			VideoID:    videoRecord.VideoID,
 			EventSeq:   1,
-			FromStatus: nil,
 			ToStatus:   video.StatusUploading,
 			Actor:      "upload-api",
 			Reason:     "upload_created",
