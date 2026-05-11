@@ -21,6 +21,10 @@ env:
   BATCH_SIZE: "100"
   SHARD_COUNT: "16"
   POLL_INTERVAL_MS: "1000"
+  OTEL_EXPORTER_OTLP_ENDPOINT: https://telemetry.googleapis.com
+  GOOGLE_CLOUD_QUOTA_PROJECT: "${PROJECT_ID}"
+  OTEL_RESOURCE_ATTRIBUTES: "gcp.project_id=${PROJECT_ID}"
+
 secret_env:
   SPANNER_DATABASE:
-    secret: outbox-poller-spanner-database
+    secret: upload-api-spanner-database
