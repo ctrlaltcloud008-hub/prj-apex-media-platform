@@ -3,16 +3,16 @@ package middleware
 import (
 	"context"
 
-	"github.com/ctrlaltcloud008-hub/prj-apex-media-platform/services/upload-api/internal/models"
+	"github.com/ctrlaltcloud008-hub/prj-apex-media-platform/internal/models"
 )
 
 type contextKey string
 
 const (
-	UserKey         contextKey = "user"
-	TierKey         contextKey = "tier"
-	RequestIDKey    contextKey = "request_id"
-	ClientRegionKey contextKey = "client_region"
+	UserKey             contextKey = "user"
+	TierKey             contextKey = "tier"
+	RequestIDKey        contextKey = "request_id"
+	ClientRegionHintKey contextKey = "client_region_hint"
 )
 
 func WithUserID(ctx context.Context, userID string) context.Context {
@@ -42,11 +42,11 @@ func RequestIDFromContext(ctx context.Context) (string, bool) {
 	return requestID, ok && requestID != ""
 }
 
-func WithClientRegion(ctx context.Context, region string) context.Context {
-	return context.WithValue(ctx, ClientRegionKey, region)
+func WithClientRegionHint(ctx context.Context, region string) context.Context {
+	return context.WithValue(ctx, ClientRegionHintKey, region)
 }
 
-func ClientRegionFromContext(ctx context.Context) (string, bool) {
-	region, ok := ctx.Value(ClientRegionKey).(string)
+func ClientRegionHintFromContext(ctx context.Context) (string, bool) {
+	region, ok := ctx.Value(ClientRegionHintKey).(string)
 	return region, ok && region != ""
 }

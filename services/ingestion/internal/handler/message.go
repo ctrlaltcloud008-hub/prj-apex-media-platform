@@ -510,17 +510,17 @@ func (p *messageProcessor) validationResult() *store.ValidationResult {
 	}
 
 	return &store.ValidationResult{
-		VideoID:      p.videoID,
-		UserID:       p.userID,
-		SourceBucket: p.payload.Notification.Bucket,
-		SourceObject: p.payload.Notification.Name,
-		SourceRegion: p.handler.sourceRegion,
-		Generation:   p.generation,
-		Meta:         p.videoMetadata,
-		Profile:      p.profile,
+		VideoID:           p.videoID,
+		UserID:            p.userID,
+		SourceBucket:      p.payload.Notification.Bucket,
+		SourceObject:      p.payload.Notification.Name,
+		SourceRegion:      p.handler.sourceRegion,
+		Generation:        p.generation,
+		Meta:              p.videoMetadata,
+		Profile:           p.profile,
 		UploadCompletedAt: uploadCompletedAt,
-		StartedAt:    p.startedAt,
-		CompletedAt:  time.Now(),
+		StartedAt:         p.startedAt,
+		CompletedAt:       time.Now(),
 	}
 }
 

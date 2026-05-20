@@ -9,15 +9,16 @@ import (
 	"time"
 
 	"cloud.google.com/go/spanner"
-	"google.golang.org/api/iterator"
 
 	"github.com/ctrlaltcloud008-hub/prj-apex-media-platform/internal/apperror"
 	"github.com/ctrlaltcloud008-hub/prj-apex-media-platform/internal/gcs"
 	"github.com/ctrlaltcloud008-hub/prj-apex-media-platform/internal/logging"
+	tier "github.com/ctrlaltcloud008-hub/prj-apex-media-platform/internal/models"
+	"github.com/ctrlaltcloud008-hub/prj-apex-media-platform/internal/quota"
 	spannerutil "github.com/ctrlaltcloud008-hub/prj-apex-media-platform/internal/spanner"
 	"github.com/ctrlaltcloud008-hub/prj-apex-media-platform/internal/video"
 	"github.com/ctrlaltcloud008-hub/prj-apex-media-platform/services/upload-api/internal/config"
-	"github.com/ctrlaltcloud008-hub/prj-apex-media-platform/services/upload-api/internal/models"
+	"github.com/ctrlaltcloud008-hub/prj-apex-media-platform/services/upload-api/internal/domain"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -26,7 +27,6 @@ import (
 )
 
 var (
-	ErrInvalidUserTier          = errors.New("invalid user tier")
 	ErrFileTooLarge             = errors.New("file too large")
 	ErrConcurrentUploadLimit    = errors.New("concurrent upload limit reached")
 	ErrHourlyUploadLimit        = errors.New("hourly upload limit reached")
@@ -37,22 +37,15 @@ var (
 
 const instrumentationName = "services/upload-api/internal/services"
 
-type CreateUploadResult struct {
-	VideoID            string
-	UploadURL          string
-	UploadURLExpiresAt time.Time
-	MaxFileSizeBytes   int64
-}
-
 type Params struct {
-	UserID    string
-	UserTier  models.UserTier
-	RequestID string
-	Region    string
+	UserID           string
+	UserTier         tier.UserTier
+	RequestID        string
+	ClientRegionHint string
 }
 
 type UploadService interface {
-	CreateUpload(ctx context.Context, params Params, req models.UploadRequest) (*CreateUploadResult, error)
+	CreateUpload(ctx context.Context, params Params, req domain.CreateUploadRequest) (*domain.CreateUploadResult, error)
 }
 
 type uploadService struct {
@@ -74,14 +67,14 @@ func NewUploadService(logger *logging.Logger,
 	}
 }
 
-func (s *uploadService) CreateUpload(ctx context.Context, params Params, req models.UploadRequest) (*CreateUploadResult, error) {
+func (s *uploadService) CreateUpload(ctx context.Context, params Params, req domain.CreateUploadRequest) (*domain.CreateUploadResult, error) {
 	ctx, span := otel.Tracer(instrumentationName).Start(ctx,
 		"upload-api.create-upload.service",
 		trace.WithAttributes(
 			attribute.String("video.request_id", params.RequestID),
 			attribute.String("video.user_id", params.UserID),
 			attribute.String("video.user_tier", string(params.UserTier)),
-			attribute.String("video.client_region", params.Region),
+			attribute.String("video.client_region_hint", params.ClientRegionHint),
 			attribute.String("video.filename", req.Filename),
 			attribute.String("video.content_type", req.ContentType),
 			attribute.Int64("video.file_size_bytes", req.FileSizeBytes),
@@ -97,13 +90,13 @@ func (s *uploadService) CreateUpload(ctx context.Context, params Params, req mod
 		slog.String("request_id", params.RequestID),
 		slog.String("user_id", params.UserID),
 		slog.String("user_tier", string(params.UserTier)),
-		slog.String("client_region", params.Region),
+		slog.String("client_region_hint", params.ClientRegionHint),
 		slog.String("filename", req.Filename),
 		slog.String("content_type", req.ContentType),
 		slog.Int64("file_size_bytes", req.FileSizeBytes),
 	)
 
-	limits, err := s.tierLimits(params.UserTier)
+	limits, err := tier.GetTierLimits(params.UserTier)
 	if err != nil {
 		span.AddEvent("upload.limits.invalid_user_tier")
 		span.RecordError(err)
@@ -140,7 +133,7 @@ func (s *uploadService) CreateUpload(ctx context.Context, params Params, req mod
 		return nil, err
 	}
 
-	bucket, resolvedRegion := s.resolveRegionAndBucket(params.Region)
+	bucket, resolvedRegion := s.resolveRegionAndBucket(params.ClientRegionHint)
 	videoID := s.generateVideoID()
 	objectPath := s.buildObjectPath(params.UserID, videoID, req.Filename)
 	span.SetAttributes(
@@ -152,19 +145,36 @@ func (s *uploadService) CreateUpload(ctx context.Context, params Params, req mod
 	span.AddEvent("upload.storage.target_resolved")
 
 	videoRecord := &video.Video{
-		VideoID:       videoID,
-		UserID:        params.UserID,
-		RequestID:     spanner.NullString{StringVal: params.RequestID, Valid: true},
-		Status:        video.StatusUploading,
-		SourceBucket:  bucket,
-		SourceObject:  objectPath,
-		GCSGeneration: 0,
-		MimeType:      spanner.NullString{StringVal: req.ContentType, Valid: req.ContentType != ""},
-		FileSizeBytes: spanner.NullInt64{Int64: req.FileSizeBytes, Valid: req.FileSizeBytes > 0},
+		VideoID:               videoID,
+		UserID:                params.UserID,
+		RequestID:             spanner.NullString{StringVal: params.RequestID, Valid: true},
+		Status:                video.StatusUploading,
+		SourceBucket:          bucket,
+		SourceObject:          objectPath,
+		GCSGeneration:         0,
+		MimeType:              spanner.NullString{StringVal: req.ContentType, Valid: req.ContentType != ""},
+		FileSizeBytes:         spanner.NullInt64{Int64: req.FileSizeBytes, Valid: req.FileSizeBytes > 0},
+		LastLifecycleEventSeq: spanner.NullInt64{Int64: 0, Valid: true},
 	}
 
-	storedVideo, err := s.executeSpannerTransaction(ctx, params.UserID, params.RequestID, limits, videoRecord)
+	storedUpload, err := s.executeSpannerTransaction(ctx, params.UserID, params.RequestID, req, limits, videoRecord)
 	if err != nil {
+		if errors.Is(err, ErrIdempotencyMismatch) || errors.Is(err, ErrRequestIDAlreadyConsumed) {
+			span.AddEvent("upload.idempotency.rejected")
+			span.RecordError(err)
+			span.SetStatus(otelcodes.Error, "request id conflict")
+			logger.Warn(
+				ctx,
+				"upload.request_id_conflict",
+				"Rejected upload request due to request ID conflict",
+				slog.String("request_id", params.RequestID),
+				slog.String("user_id", params.UserID),
+				slog.String("video_id", videoID),
+				slog.String("error", err.Error()),
+			)
+			return nil, err
+		}
+
 		span.AddEvent("upload.transaction.failed")
 		span.RecordError(err)
 		span.SetStatus(otelcodes.Error, "failed to persist upload request")
@@ -181,7 +191,7 @@ func (s *uploadService) CreateUpload(ctx context.Context, params Params, req mod
 		)
 		return nil, err
 	}
-	if storedVideo == nil {
+	if storedUpload == nil {
 		missingResultErr := fmt.Errorf("%w: missing stored video result", ErrUploadServiceUnavailable)
 		span.AddEvent("upload.transaction.missing_result")
 		span.RecordError(missingResultErr)
@@ -197,10 +207,10 @@ func (s *uploadService) CreateUpload(ctx context.Context, params Params, req mod
 		return nil, missingResultErr
 	}
 
-	idempotentReplay := storedVideo.VideoID != videoRecord.VideoID
-	videoID = storedVideo.VideoID
-	bucket = storedVideo.SourceBucket
-	objectPath = s.normalizeObjectPath(bucket, storedVideo.SourceObject)
+	idempotentReplay := storedUpload.VideoID != videoRecord.VideoID
+	videoID = storedUpload.VideoID
+	bucket = storedUpload.SourceBucket
+	objectPath = s.normalizeObjectPath(bucket, storedUpload.SourceObject)
 	span.SetAttributes(
 		attribute.String("video.id", videoID),
 		attribute.String("storage.bucket", bucket),
@@ -222,13 +232,13 @@ func (s *uploadService) CreateUpload(ctx context.Context, params Params, req mod
 	)
 
 	uploadContentType := req.ContentType
-	if storedVideo.MimeType.Valid {
-		uploadContentType = storedVideo.MimeType.StringVal
+	if storedUpload.MimeType.Valid {
+		uploadContentType = storedUpload.MimeType.StringVal
 	}
 
 	uploadFileSize := req.FileSizeBytes
-	if storedVideo.FileSizeBytes.Valid && storedVideo.FileSizeBytes.Int64 > 0 {
-		uploadFileSize = storedVideo.FileSizeBytes.Int64
+	if storedUpload.FileSizeBytes.Valid && storedUpload.FileSizeBytes.Int64 > 0 {
+		uploadFileSize = storedUpload.FileSizeBytes.Int64
 	}
 
 	var uploadURL string
@@ -263,14 +273,14 @@ func (s *uploadService) CreateUpload(ctx context.Context, params Params, req mod
 		return nil, fmt.Errorf("%w: %w", ErrSignedURLGeneration, err)
 	}
 
-	response := &CreateUploadResult{
-		VideoID:            storedVideo.VideoID,
+	response := &domain.CreateUploadResult{
+		VideoID:            storedUpload.VideoID,
 		UploadURL:          uploadURL,
 		UploadURLExpiresAt: expiry,
 		MaxFileSizeBytes:   limits.MaxFileSizeBytes,
 	}
 	span.SetAttributes(
-		attribute.String("video.id", storedVideo.VideoID),
+		attribute.String("video.id", storedUpload.VideoID),
 		attribute.Int64("video.max_file_size_bytes", limits.MaxFileSizeBytes),
 		attribute.String("video.upload_url_expires_at", expiry.UTC().Format(time.RFC3339)),
 	)
@@ -282,7 +292,7 @@ func (s *uploadService) CreateUpload(ctx context.Context, params Params, req mod
 		"Generated signed upload URL",
 		slog.String("request_id", params.RequestID),
 		slog.String("user_id", params.UserID),
-		slog.String("video_id", storedVideo.VideoID),
+		slog.String("video_id", storedUpload.VideoID),
 		slog.String("bucket", bucket),
 		slog.String("object_path", objectPath),
 		slog.Time("upload_url_expires_at", expiry),
@@ -293,16 +303,7 @@ func (s *uploadService) CreateUpload(ctx context.Context, params Params, req mod
 	return response, nil
 }
 
-func (s *uploadService) tierLimits(userTier models.UserTier) (models.TierLimits, error) {
-	limits, ok := models.TierLimitsMap[userTier]
-	if !ok {
-		return models.TierLimits{}, fmt.Errorf("%w %q", ErrInvalidUserTier, userTier)
-	}
-
-	return limits, nil
-}
-
-func (s *uploadService) validateFileSizeForTier(limits models.TierLimits, fileSize int64) error {
+func (s *uploadService) validateFileSizeForTier(limits tier.TierLimits, fileSize int64) error {
 
 	if fileSize > limits.MaxFileSizeBytes {
 		return fmt.Errorf("%w: max_file_size_bytes=%d", ErrFileTooLarge, limits.MaxFileSizeBytes)
@@ -343,7 +344,7 @@ func (s *uploadService) generateVideoID() string {
 }
 
 func (s *uploadService) executeSpannerTransaction(
-	ctx context.Context, userID, requestID string, limits models.TierLimits, videoRecord *video.Video) (*video.Video, error) {
+	ctx context.Context, userID, requestID string, req domain.CreateUploadRequest, limits tier.TierLimits, videoRecord *video.Video) (*storedUploadRecord, error) {
 	ctx, span := otel.Tracer(instrumentationName).Start(ctx,
 		"upload-api.spanner.read-write-tx",
 		trace.WithAttributes(
@@ -354,17 +355,19 @@ func (s *uploadService) executeSpannerTransaction(
 	)
 	defer span.End()
 
-	var resultVideo *video.Video
-	logger := s.logger.WithSpanContext(ctx).WithVideoID(videoRecord.VideoID)
+	var resultUpload *storedUploadRecord
+	logger := s.logger.WithSpanContext(ctx)
 
 	_, err := spannerutil.RunRW(ctx, s.spanner, func(ctx context.Context, txn *spanner.ReadWriteTransaction) error {
 
-		existingVideo, err := s.checkIdempotency(ctx, txn, userID, requestID)
+		decision, err := s.checkIdempotency(ctx, txn, userID, requestID, req)
 		if err != nil {
 			return fmt.Errorf("%w: %w", ErrUploadServiceUnavailable, err)
 		}
 
-		if existingVideo != nil {
+		switch decision.kind {
+		case idempotencyDecisionReplay:
+			existingVideo := decision.record
 			span.AddEvent("upload.idempotency.hit", trace.WithAttributes(
 				attribute.String("video.existing_id", existingVideo.VideoID),
 				attribute.String("video.status", string(existingVideo.Status)),
@@ -378,11 +381,43 @@ func (s *uploadService) executeSpannerTransaction(
 				slog.String("existing_video_id", existingVideo.VideoID),
 				slog.String("status", string(existingVideo.Status)),
 			)
-			resultVideo = existingVideo
+			resultUpload = existingVideo.storedUploadRecord()
 			return nil
+		case idempotencyDecisionMismatch:
+			existingVideo := decision.record
+			span.AddEvent("upload.idempotency.mismatch", trace.WithAttributes(
+				attribute.String("video.existing_id", existingVideo.VideoID),
+				attribute.String("upload.mismatched_fields", strings.Join(decision.mismatchedFields, ",")),
+			))
+			logger.Warn(
+				ctx,
+				"upload.idempotency_mismatch",
+				"Rejected upload request with mismatched idempotent payload",
+				slog.String("request_id", requestID),
+				slog.String("user_id", userID),
+				slog.String("existing_video_id", existingVideo.VideoID),
+				slog.String("mismatched_fields", strings.Join(decision.mismatchedFields, ",")),
+			)
+			return &IdempotencyMismatchError{RequestID: requestID, MismatchedFields: decision.mismatchedFields}
+		case idempotencyDecisionConsumed:
+			existingVideo := decision.record
+			span.AddEvent("upload.idempotency.consumed", trace.WithAttributes(
+				attribute.String("video.existing_id", existingVideo.VideoID),
+				attribute.String("video.status", string(existingVideo.Status)),
+			))
+			logger.Warn(
+				ctx,
+				"upload.request_id_already_consumed",
+				"Rejected upload request for already-consumed request ID",
+				slog.String("request_id", requestID),
+				slog.String("user_id", userID),
+				slog.String("existing_video_id", existingVideo.VideoID),
+				slog.String("status", string(existingVideo.Status)),
+			)
+			return &RequestIDAlreadyConsumedError{RequestID: requestID, VideoID: existingVideo.VideoID, Status: string(existingVideo.Status)}
 		}
 
-		activeUploads, err := s.checkConcurrentLimit(ctx, txn, userID)
+		activeUploads, err := quota.CheckConcurrentLimit(ctx, txn, userID)
 		if err != nil {
 			return fmt.Errorf("%w: %w", ErrUploadServiceUnavailable, err)
 		}
@@ -404,7 +439,7 @@ func (s *uploadService) executeSpannerTransaction(
 			return fmt.Errorf("%w: user_id=%q max_concurrent_uploads=%d", ErrConcurrentUploadLimit, userID, limits.MaxConcurrentUploads)
 		}
 
-		uploadsLastHour, err := s.checkHourlyRateLimit(ctx, txn, userID)
+		uploadsLastHour, err := quota.CheckHourlyRateLimit(ctx, txn, userID)
 		if err != nil {
 			return fmt.Errorf("%w: %w", ErrUploadServiceUnavailable, err)
 		}
@@ -426,7 +461,7 @@ func (s *uploadService) executeSpannerTransaction(
 			return fmt.Errorf("%w: user_id=%q max_uploads_per_hour=%d", ErrHourlyUploadLimit, userID, limits.MaxUploadsPerHour)
 		}
 
-		totalStorageUsed, err := s.checkStorageQuota(ctx, txn, userID)
+		totalStorageUsed, err := quota.CheckStorageQuota(ctx, txn, userID)
 		if err != nil {
 			return fmt.Errorf("%w: %w", ErrUploadServiceUnavailable, err)
 		}
@@ -454,12 +489,10 @@ func (s *uploadService) executeSpannerTransaction(
 			return fmt.Errorf("%w: %w", ErrUploadServiceUnavailable, err)
 		}
 
-		if err := video.InsertLifecycleEvent(ctx, txn, video.LifecycleEventParams{
-			VideoID:    videoRecord.VideoID,
-			EventSeq:   1,
-			ToStatus:   video.StatusUploading,
-			Actor:      "upload-api",
-			Reason:     "upload_created",
+		if err := video.AppendLifecycleEvents(ctx, txn, videoRecord.VideoID, video.LifecycleEventParams{
+			ToStatus: video.StatusUploading,
+			Actor:    "upload-api",
+			Reason:   "upload_created",
 		}); err != nil {
 			return fmt.Errorf("%w: %w", ErrUploadServiceUnavailable, err)
 		}
@@ -495,6 +528,7 @@ func (s *uploadService) executeSpannerTransaction(
 			"Persisted upload record and lifecycle state",
 			slog.String("request_id", requestID),
 			slog.String("user_id", userID),
+			slog.String("video_id", videoRecord.VideoID),
 			slog.String("bucket", videoRecord.SourceBucket),
 			slog.String("object_path", videoRecord.SourceObject),
 			slog.Int64("gcs_generation", videoRecord.GCSGeneration),
@@ -505,7 +539,7 @@ func (s *uploadService) executeSpannerTransaction(
 			attribute.Int64("storage.gcs_generation", videoRecord.GCSGeneration),
 		))
 
-		resultVideo = videoRecord
+		resultUpload = storedUploadRecordFromVideo(videoRecord)
 
 		return nil
 	})
@@ -518,153 +552,17 @@ func (s *uploadService) executeSpannerTransaction(
 
 	span.SetStatus(otelcodes.Ok, "spanner transaction committed")
 
-	return resultVideo, nil
-}
-
-func (s *uploadService) checkIdempotency(ctx context.Context, txn *spanner.ReadWriteTransaction, userID, requestID string) (*video.Video, error) {
-
-	stmt := spanner.Statement{
-		SQL: `SELECT video_id, user_id, request_id, status, source_bucket, source_object,
-				     gcs_generation, mime_type, file_size_bytes, duration_ms, source_width,
-				     source_height, source_codec, source_fps, is_hdr, transcode_profile,
-				     transcoder_job_id, thumbnail_uri, caption_uri, moderation_decision,
-				     content_rating_hint, error_details, created_at, updated_at
-			  FROM videos
-			  WHERE user_id = @user_id AND request_id = @request_id
-			  ORDER BY created_at DESC
-			  LIMIT 1`,
-		Params: map[string]any{
-			"user_id":    userID,
-			"request_id": requestID,
-		},
-	}
-
-	iter := txn.Query(ctx, stmt)
-	defer iter.Stop()
-
-	row, err := iter.Next()
-	if err == iterator.Done {
-		return nil, nil
-	}
-
-	if err != nil {
-		return nil, fmt.Errorf("query existing video for idempotency check: %w", err)
-	}
-
-	var existingVideo video.Video
-	if err := row.ToStruct(&existingVideo); err != nil {
-		return nil, fmt.Errorf("read video row for idempotency check: %w", err)
-	}
-
-	return &existingVideo, nil
-
-}
-
-func (s *uploadService) checkConcurrentLimit(ctx context.Context, txn *spanner.ReadWriteTransaction, userID string) (int64, error) {
-
-	stmt := spanner.Statement{
-		SQL: `SELECT COUNT(1) AS active_uploads
-			  FROM videos
-			  WHERE user_id = @user_id AND status = @status`,
-		Params: map[string]any{
-			"user_id": userID,
-			"status":  video.StatusUploading,
-		},
-	}
-
-	iter := txn.Query(ctx, stmt)
-	defer iter.Stop()
-
-	row, err := iter.Next()
-	if err == iterator.Done {
-		return 0, nil
-	}
-
-	if err != nil {
-		return 0, fmt.Errorf("query active uploads for concurrent limit check: %w", err)
-	}
-
-	var activeUploads int64
-	if err := row.ColumnByName("active_uploads", &activeUploads); err != nil {
-		return 0, fmt.Errorf("read active uploads count for concurrent limit check: %w", err)
-	}
-
-	return activeUploads, nil
-}
-
-func (s *uploadService) checkHourlyRateLimit(ctx context.Context, txn *spanner.ReadWriteTransaction, userID string) (int64, error) {
-
-	stmt := spanner.Statement{
-		SQL: `SELECT COUNT(1) AS uploads_last_hour
-			  FROM videos
-			  WHERE user_id = @user_id AND status = @status AND created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)`,
-		Params: map[string]any{
-			"user_id": userID,
-			"status":  video.StatusUploading,
-		},
-	}
-
-	iter := txn.Query(ctx, stmt)
-	defer iter.Stop()
-
-	row, err := iter.Next()
-	if err == iterator.Done {
-		return 0, nil
-	}
-
-	if err != nil {
-		return 0, fmt.Errorf("query uploads in last hour for rate limit check: %w", err)
-	}
-
-	var uploadsLastHour int64
-	if err := row.ColumnByName("uploads_last_hour", &uploadsLastHour); err != nil {
-		return 0, fmt.Errorf("read uploads in last hour count for rate limit check: %w", err)
-	}
-
-	return uploadsLastHour, nil
-}
-
-func (s *uploadService) checkStorageQuota(ctx context.Context, txn *spanner.ReadWriteTransaction, userID string) (int64, error) {
-
-	stmt := spanner.Statement{
-		SQL: `SELECT IFNULL(SUM(file_size_bytes), 0) AS total_storage_used
-			  FROM videos
-			  WHERE user_id = @user_id AND status NOT IN (@status_failed, @status_expired)`,
-		Params: map[string]any{
-			"user_id":        userID,
-			"status_failed":  video.StatusFailed,
-			"status_expired": video.StatusExpired,
-		},
-	}
-
-	iter := txn.Query(ctx, stmt)
-	defer iter.Stop()
-
-	row, err := iter.Next()
-	if err == iterator.Done {
-		return 0, nil
-	}
-
-	if err != nil {
-		return 0, fmt.Errorf("query total storage used for storage quota check: %w", err)
-	}
-
-	var totalStorageUsed int64
-	if err := row.ColumnByName("total_storage_used", &totalStorageUsed); err != nil {
-		return 0, fmt.Errorf("read total storage used for storage quota check: %w", err)
-	}
-
-	return totalStorageUsed, nil
+	return resultUpload, nil
 }
 
 func (s *uploadService) insertVideoRecord(ctx context.Context, txn *spanner.ReadWriteTransaction, videoRecord *video.Video) error {
 
 	mutation := spanner.InsertOrUpdate("videos",
 		[]string{"video_id", "user_id", "request_id", "status", "source_bucket", "source_object",
-			"gcs_generation", "mime_type", "file_size_bytes", "created_at", "updated_at"},
+			"gcs_generation", "mime_type", "file_size_bytes", "last_lifecycle_event_seq", "created_at", "updated_at"},
 		[]any{videoRecord.VideoID, videoRecord.UserID, videoRecord.RequestID, videoRecord.Status,
 			videoRecord.SourceBucket, videoRecord.SourceObject,
-			videoRecord.GCSGeneration, videoRecord.MimeType, videoRecord.FileSizeBytes, spanner.CommitTimestamp, spanner.CommitTimestamp},
+			videoRecord.GCSGeneration, videoRecord.MimeType, videoRecord.FileSizeBytes, videoRecord.LastLifecycleEventSeq, spanner.CommitTimestamp, spanner.CommitTimestamp},
 	)
 
 	return txn.BufferWrite([]*spanner.Mutation{mutation})

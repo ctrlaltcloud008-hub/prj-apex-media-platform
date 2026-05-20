@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/ctrlaltcloud008-hub/prj-apex-media-platform/internal/logging"
+	tier "github.com/ctrlaltcloud008-hub/prj-apex-media-platform/internal/models"
 	"github.com/ctrlaltcloud008-hub/prj-apex-media-platform/services/upload-api/internal/models"
 )
 
@@ -22,7 +23,7 @@ func Authentication(logger *logging.Logger) Middleware {
 					slog.String("method", r.Method),
 					slog.String("path", r.URL.Path),
 				)
-				http.Error(w, "missing Authorization header", http.StatusUnauthorized)
+				models.WriteError(w, models.NewMissingAuthorizationHeaderError())
 				return
 			}
 
@@ -37,7 +38,7 @@ func Authentication(logger *logging.Logger) Middleware {
 					slog.String("method", r.Method),
 					slog.String("path", r.URL.Path),
 				)
-				http.Error(w, "invalid Authorization header format", http.StatusUnauthorized)
+				models.WriteError(w, models.NewInvalidAuthorizationHeaderError())
 				return
 			}
 
@@ -51,24 +52,24 @@ func Authentication(logger *logging.Logger) Middleware {
 					slog.String("method", r.Method),
 					slog.String("path", r.URL.Path),
 				)
-				http.Error(w, "missing token in Authorization header", http.StatusUnauthorized)
+				models.WriteError(w, models.NewMissingBearerTokenError())
 				return
 			}
 
-			region := r.Header.Get("X-Client-Region")
+			clientRegionHint := r.Header.Get("X-Client-Region")
 
 			// If the token is valid, you can set user information in the request context here.
 			ctx := WithUserID(r.Context(), "exampleUser")
-			ctx = WithUserTier(ctx, models.UserTierFree)
-			ctx = WithClientRegion(ctx, region)
+			ctx = WithUserTier(ctx, tier.UserTierFree)
+			ctx = WithClientRegionHint(ctx, clientRegionHint)
 			logger.Info(
 				ctx,
 				"auth.authenticated",
 				"Authenticated upload request",
 				slog.String("request_id", requestID),
 				slog.String("user_id", "exampleUser"),
-				slog.String("user_tier", string(models.UserTierFree)),
-				slog.String("client_region", region),
+				slog.String("user_tier", string(tier.UserTierFree)),
+				slog.String("client_region_hint", clientRegionHint),
 				slog.String("method", r.Method),
 				slog.String("path", r.URL.Path),
 			)

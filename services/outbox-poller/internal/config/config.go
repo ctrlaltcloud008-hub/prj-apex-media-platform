@@ -15,7 +15,6 @@ type OutboxPollerConfig struct {
 	projectID      string
 	spannerDB      string
 	batchSize      int64
-	shardCount     int
 	pollIntervalMS int
 }
 
@@ -29,7 +28,6 @@ func LoadOutboxPollerConfig() (*OutboxPollerConfig, error) {
 	v.SetDefault("PROJECT_ID", "apex-494315")
 	v.SetDefault("SPANNER_DATABASE", "")
 	v.SetDefault("BATCH_SIZE", 100)
-	v.SetDefault("SHARD_COUNT", 16)
 	v.SetDefault("POLL_INTERVAL_MS", 1000)
 
 	if err := config.LoadConfig(v, "outbox"); err != nil {
@@ -44,7 +42,6 @@ func LoadOutboxPollerConfig() (*OutboxPollerConfig, error) {
 		projectID:      v.GetString("PROJECT_ID"),
 		spannerDB:      v.GetString("SPANNER_DATABASE"),
 		batchSize:      v.GetInt64("BATCH_SIZE"),
-		shardCount:     v.GetInt("SHARD_COUNT"),
 		pollIntervalMS: v.GetInt("POLL_INTERVAL_MS"),
 	}
 
@@ -68,7 +65,6 @@ func (c *OutboxPollerConfig) Service() string   { return c.service }
 func (c *OutboxPollerConfig) Region() string    { return c.region }
 func (c *OutboxPollerConfig) ProjectID() string { return c.projectID }
 func (c *OutboxPollerConfig) BatchSize() int64  { return c.batchSize }
-func (c *OutboxPollerConfig) ShardCount() int   { return c.shardCount }
 func (c *OutboxPollerConfig) SpannerDatabase() string {
 	return c.spannerDB
 }

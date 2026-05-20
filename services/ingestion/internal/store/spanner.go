@@ -30,26 +30,6 @@ type ValidationResult struct {
 	CompletedAt       time.Time
 }
 
-type videoValidatedPayload struct {
-	VideoID          string                        `json:"video_id"`
-	UserID           string                        `json:"user_id"`
-	SourceGCSURI     string                        `json:"source_gcs_uri"`
-	TranscodeProfile string                        `json:"transcode_profile"`
-	SourceRegion     string                        `json:"source_region"`
-	GCSGeneration    int64                         `json:"gcs_generation"`
-	Metadata         videoValidatedMetadataPayload `json:"metadata"`
-}
-
-type videoValidatedMetadataPayload struct {
-	DurationMs  int64   `json:"duration_ms"`
-	Width       int     `json:"width"`
-	Height      int     `json:"height"`
-	Codec       string  `json:"codec"`
-	FPS         float64 `json:"fps"`
-	IsHDR       bool    `json:"is_hdr"`
-	BitrateKbps int64   `json:"bitrate_kbps"`
-}
-
 func (r *ValidationResult) validate() error {
 	if r == nil {
 		return fmt.Errorf("validation result is nil")
@@ -101,15 +81,15 @@ func (r *ValidationResult) sourceGCSURI() string {
 	return fmt.Sprintf("gs://%s/%s", r.SourceBucket, r.SourceObject)
 }
 
-func buildVideoValidatedPayload(params *ValidationResult) videoValidatedPayload {
-	return videoValidatedPayload{
+func buildVideoValidatedPayload(params *ValidationResult) video.VideoValidatedPayload {
+	return video.VideoValidatedPayload{
 		VideoID:          params.VideoID,
 		UserID:           params.UserID,
 		SourceGCSURI:     params.sourceGCSURI(),
 		TranscodeProfile: params.Profile,
 		SourceRegion:     params.SourceRegion,
 		GCSGeneration:    params.Generation,
-		Metadata: videoValidatedMetadataPayload{
+		Metadata: video.VideoValidatedMetadataPayload{
 			DurationMs:  params.Meta.DurationMs,
 			Width:       params.Meta.Width,
 			Height:      params.Meta.Height,
@@ -166,28 +146,22 @@ func CommitValidation(ctx context.Context, client *spanner.Client, params *Valid
 			return fmt.Errorf("complete uploading stage: %w", err)
 		}
 
-		err = video.InsertLifecycleEvent(ctx, txn, video.LifecycleEventParams{
-			VideoID:    params.VideoID,
-			EventSeq:   2,
-			FromStatus: video.StatusUploading,
-			ToStatus:   video.StatusValidating,
-			Actor:      "ingestion",
-			Reason:     "validation started",
-		})
+		err = video.AppendLifecycleEvents(ctx, txn, params.VideoID,
+			video.LifecycleEventParams{
+				FromStatus: video.StatusUploading,
+				ToStatus:   video.StatusValidating,
+				Actor:      "ingestion",
+				Reason:     "validation started",
+			},
+			video.LifecycleEventParams{
+				FromStatus: video.StatusValidating,
+				ToStatus:   video.StatusValidated,
+				Actor:      "ingestion",
+				Reason:     "validation completed",
+			},
+		)
 		if err != nil {
-			return fmt.Errorf("insert lifecycle event: %w", err)
-		}
-
-		err = video.InsertLifecycleEvent(ctx, txn, video.LifecycleEventParams{
-			VideoID:    params.VideoID,
-			EventSeq:   3,
-			FromStatus: video.StatusValidating,
-			ToStatus:   video.StatusValidated,
-			Actor:      "ingestion",
-			Reason:     "validation completed",
-		})
-		if err != nil {
-			return fmt.Errorf("insert lifecycle event: %w", err)
+			return fmt.Errorf("append lifecycle events: %w", err)
 		}
 
 		err = video.InsertVideoStageRecord(ctx, txn, video.StageRecordParams{

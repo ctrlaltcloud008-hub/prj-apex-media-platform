@@ -14,6 +14,7 @@ import (
 
 	"github.com/ctrlaltcloud008-hub/prj-apex-media-platform/internal/logging"
 	"github.com/ctrlaltcloud008-hub/prj-apex-media-platform/internal/otel"
+	"github.com/ctrlaltcloud008-hub/prj-apex-media-platform/internal/outbox"
 	pbclient "github.com/ctrlaltcloud008-hub/prj-apex-media-platform/internal/pubsub"
 	"github.com/ctrlaltcloud008-hub/prj-apex-media-platform/internal/spanner"
 	"github.com/ctrlaltcloud008-hub/prj-apex-media-platform/services/outbox-poller/internal/config"
@@ -46,7 +47,7 @@ func run() error {
 		slog.String("spanner_database", cfg.SpannerDatabase()),
 		slog.Int64("batch_size", cfg.BatchSize()),
 		slog.Int("poll_interval_ms", cfg.PollIntervalMS()),
-		slog.Int("shard_count", cfg.ShardCount()),
+		slog.Int64("shard_count", outbox.DefaultShardCount),
 	)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -131,7 +132,7 @@ func run() error {
 		slog.String("spanner_database", cfg.SpannerDatabase()),
 	)
 
-	assignedShards := allShards(cfg.ShardCount())
+	assignedShards := allShards(outbox.DefaultShardCount)
 	p := poller.NewPoller(spannerClient, publisher, cfg.BatchSize(), assignedShards, logger)
 	logger.Info(
 		ctx,
@@ -274,10 +275,10 @@ func run() error {
 	return runErr
 }
 
-func allShards(n int) []int64 {
+func allShards(n int64) []int64 {
 	shards := make([]int64, 0, n)
-	for i := 0; i < n; i++ {
-		shards = append(shards, int64(i))
+	for i := int64(0); i < n; i++ {
+		shards = append(shards, i)
 	}
 
 	return shards

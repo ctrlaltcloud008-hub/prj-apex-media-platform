@@ -137,12 +137,11 @@ func run() error {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handler.Healthz)
-	mux.HandleFunc("POST /upload", handler.Upload(logger, uploadService))
+	mux.Handle("POST /upload", middleware.Authentication(logger)(handler.Upload(logger, uploadService)))
 
 	wrapped := middleware.Chain(
 		mux,
 		middleware.RequestID(logger),
-		middleware.Authentication(logger),
 		middleware.RequestLogging(logger),
 	)
 
@@ -158,7 +157,7 @@ func run() error {
 		slog.String("addr", cfg.Port()),
 		slog.String("routes", "GET /healthz,POST /upload"),
 		slog.Bool("request_id_middleware", true),
-		slog.Bool("authentication_middleware", true),
+		slog.String("authentication_scope", "POST /upload"),
 		slog.Bool("request_logging_middleware", true),
 	)
 

@@ -15,8 +15,11 @@ func ParseObjectPath(objectID string) (string, string, error) {
 	videoID := parts[1]
 	filename := parts[2]
 
-	if !strings.HasPrefix(filename, "source.") {
-		return "", "", fmt.Errorf("unexpected filename %q, expected source.{ext}", filename)
+	if filename == "" {
+		return "", "", fmt.Errorf("filename is empty in object path: %s", objectID)
+	}
+	if strings.Contains(filename, "/") {
+		return "", "", fmt.Errorf("filename contains nested path in object path: %s", objectID)
 	}
 
 	if userID == "" || videoID == "" {

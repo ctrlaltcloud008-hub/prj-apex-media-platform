@@ -1,5 +1,10 @@
 package models
 
+import (
+	"errors"
+	"fmt"
+)
+
 type UserTier string
 
 const (
@@ -7,6 +12,8 @@ const (
 	UserTierStandard UserTier = "STANDARD"
 	UserTierPremium  UserTier = "PREMIUM"
 )
+
+var ErrInvalidUserTier = errors.New("invalid user tier")
 
 type TierLimits struct {
 	MaxConcurrentUploads     int64
@@ -38,4 +45,13 @@ var TierLimitsMap = map[UserTier]TierLimits{
 		StorageQuotaBytes:        5 * 1024 * 1024 * 1024 * 1024, // 5 TB
 		SignedURLExpirationHours: 24,
 	},
+}
+
+func GetTierLimits(userTier UserTier) (TierLimits, error) {
+	limits, ok := TierLimitsMap[userTier]
+	if !ok {
+		return TierLimits{}, fmt.Errorf("%w %q", ErrInvalidUserTier, userTier)
+	}
+
+	return limits, nil
 }

@@ -19,7 +19,6 @@ env:
   SERVICE: outbox-poller
   REGION: asia-south1
   BATCH_SIZE: "100"
-  SHARD_COUNT: "16"
   POLL_INTERVAL_MS: "1000"
   OTEL_EXPORTER_OTLP_ENDPOINT: https://telemetry.googleapis.com
   GOOGLE_CLOUD_QUOTA_PROJECT: "${PROJECT_ID}"

@@ -1,7 +1,6 @@
 package middleware
 
 import (
-	"encoding/json"
 	"log/slog"
 	"net/http"
 
@@ -28,10 +27,7 @@ func RequestID(logger *logging.Logger) Middleware {
 						slog.String("path", r.URL.Path),
 						slog.String("request_id", requestID),
 					)
-					errPayload := models.NewErrorResponse(models.StatusInvalidArgument, http.StatusBadRequest, "X-Request-ID must be a valid UUID").WithReason(models.ReasonInvalidRequestID).WithMetadata(map[string]string{"received_value": requestID})
-					w.Header().Set("Content-Type", "application/json")
-					w.WriteHeader(http.StatusBadRequest)
-					json.NewEncoder(w).Encode(errPayload)
+					models.WriteError(w, models.NewInvalidRequestIDError(requestID))
 					return
 				}
 				// Use the provided request ID if it's valid

@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/ctrlaltcloud008-hub/prj-apex-media-platform/internal/logging"
+	tier "github.com/ctrlaltcloud008-hub/prj-apex-media-platform/internal/models"
+	"github.com/ctrlaltcloud008-hub/prj-apex-media-platform/services/upload-api/internal/domain"
 	"github.com/ctrlaltcloud008-hub/prj-apex-media-platform/services/upload-api/internal/middleware"
 	"github.com/ctrlaltcloud008-hub/prj-apex-media-platform/services/upload-api/internal/models"
 	"github.com/ctrlaltcloud008-hub/prj-apex-media-platform/services/upload-api/internal/services"
@@ -17,15 +20,16 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-func writeJSON(w http.ResponseWriter, status int, payload any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(payload)
-}
-
 func uploadErrorResponse(err error) *models.ErrorResponse {
+	var idempotencyMismatchErr *services.IdempotencyMismatchError
+	var requestIDConsumedErr *services.RequestIDAlreadyConsumedError
+
 	switch {
-	case errors.Is(err, services.ErrInvalidUserTier):
+	case errors.As(err, &idempotencyMismatchErr):
+		return models.NewErrorResponse(models.StatusConflict, http.StatusConflict, "request ID conflicts with a different upload payload").WithReason(models.ReasonIdempotencyMismatch).WithMetadata(map[string]string{"request_id": idempotencyMismatchErr.RequestID, "mismatched_fields": strings.Join(idempotencyMismatchErr.MismatchedFields, ",")}).WithInternal(err)
+	case errors.As(err, &requestIDConsumedErr):
+		return models.NewErrorResponse(models.StatusConflict, http.StatusConflict, "request ID already consumed").WithReason(models.ReasonRequestIDAlreadyConsumed).WithMetadata(map[string]string{"request_id": requestIDConsumedErr.RequestID, "video_id": requestIDConsumedErr.VideoID, "status": requestIDConsumedErr.Status}).WithInternal(err)
+	case errors.Is(err, tier.ErrInvalidUserTier):
 		return models.NewErrorResponse(models.StatusInvalidArgument, http.StatusBadRequest, "invalid user tier").WithInternal(err)
 	case errors.Is(err, services.ErrFileTooLarge):
 		return models.NewErrorResponse(models.StatusInvalidArgument, http.StatusRequestEntityTooLarge, "file too large").WithReason(models.ReasonFileTooLarge).WithInternal(err)
@@ -60,16 +64,13 @@ func paramsFromRequest(r *http.Request) (services.Params, error) {
 		return services.Params{}, fmt.Errorf("missing request id")
 	}
 
-	region, ok := middleware.ClientRegionFromContext(r.Context())
-	if !ok {
-		return services.Params{}, fmt.Errorf("missing client region")
-	}
+	clientRegionHint, _ := middleware.ClientRegionHintFromContext(r.Context())
 
 	return services.Params{
-		UserID:    userID,
-		UserTier:  userTier,
-		RequestID: requestID,
-		Region:    region,
+		UserID:           userID,
+		UserTier:         userTier,
+		RequestID:        requestID,
+		ClientRegionHint: clientRegionHint,
 	}, nil
 }
 
@@ -77,13 +78,13 @@ func uploadLogAttrs(r *http.Request, req *models.UploadRequest) []slog.Attr {
 	requestID, _ := middleware.RequestIDFromContext(r.Context())
 	userID, _ := middleware.UserIDFromContext(r.Context())
 	userTier, _ := middleware.UserTierFromContext(r.Context())
-	clientRegion, _ := middleware.ClientRegionFromContext(r.Context())
+	clientRegionHint, _ := middleware.ClientRegionHintFromContext(r.Context())
 
 	attrs := []slog.Attr{
 		slog.String("request_id", requestID),
 		slog.String("user_id", userID),
 		slog.String("user_tier", string(userTier)),
-		slog.String("client_region", clientRegion),
+		slog.String("client_region_hint", clientRegionHint),
 		slog.String("method", r.Method),
 		slog.String("path", r.URL.Path),
 	}
@@ -97,6 +98,24 @@ func uploadLogAttrs(r *http.Request, req *models.UploadRequest) []slog.Attr {
 	}
 
 	return attrs
+}
+
+func domainUploadRequest(req models.UploadRequest) domain.CreateUploadRequest {
+	return domain.CreateUploadRequest{
+		Filename:      req.Filename,
+		ContentType:   req.ContentType,
+		FileSizeBytes: req.FileSizeBytes,
+	}
+}
+
+func uploadResponse(result *domain.CreateUploadResult) *models.UploadResponse {
+	return &models.UploadResponse{
+		VideoID:             result.VideoID,
+		UploadURL:           result.UploadURL,
+		UploadURLExpiresAt:  result.UploadURLExpiresAt.UTC().Format("2006-01-02T15:04:05Z07:00"),
+		MaxFileSizeBytes:    result.MaxFileSizeBytes,
+		AllowedContentTypes: validation.AllowedContentTypesList(),
+	}
 }
 
 func Upload(logger *logging.Logger, uploadService services.UploadService) http.HandlerFunc {
@@ -120,7 +139,7 @@ func Upload(logger *logging.Logger, uploadService services.UploadService) http.H
 			logger.Warn(r.Context(), "upload.request_invalid_json", "Rejected upload request with invalid JSON", uploadLogAttrs(r, nil)...)
 			errPayload := models.NewErrorResponse(models.StatusInvalidArgument,
 				http.StatusBadRequest, "invalid JSON payload").WithMetadata(map[string]string{"error": err.Error()})
-			writeJSON(w, http.StatusBadRequest, errPayload)
+			models.WriteError(w, errPayload)
 			return
 		}
 
@@ -136,7 +155,7 @@ func Upload(logger *logging.Logger, uploadService services.UploadService) http.H
 			logger.Warn(r.Context(), "upload.request_invalid_content_type", "Rejected upload request with unsupported content type", uploadLogAttrs(r, &req)...)
 			errPayload := models.NewErrorResponse(models.StatusInvalidArgument,
 				http.StatusBadRequest, "unsupported content type").WithReason(models.ReasonInvalidContentType).WithMetadata(map[string]string{"content_type": req.ContentType})
-			writeJSON(w, http.StatusBadRequest, errPayload)
+			models.WriteError(w, errPayload)
 			return
 		}
 
@@ -146,7 +165,7 @@ func Upload(logger *logging.Logger, uploadService services.UploadService) http.H
 			logger.Warn(r.Context(), "upload.request_invalid_filename", "Rejected upload request with invalid filename", uploadLogAttrs(r, &req)...)
 			errPayload := models.NewErrorResponse(models.StatusInvalidArgument,
 				http.StatusBadRequest, "invalid filename").WithReason(models.ReasonInvalidFilename).WithMetadata(map[string]string{"filename": req.Filename})
-			writeJSON(w, http.StatusBadRequest, errPayload)
+			models.WriteError(w, errPayload)
 			return
 		}
 
@@ -157,7 +176,7 @@ func Upload(logger *logging.Logger, uploadService services.UploadService) http.H
 			logger.Warn(r.Context(), "upload.request_missing_context", "Rejected upload request with missing request context", uploadLogAttrs(r, &req)...)
 			errPayload := models.NewErrorResponse(models.StatusInvalidArgument,
 				http.StatusBadRequest, "missing required parameters").WithMetadata(map[string]string{"error": err.Error()})
-			writeJSON(w, http.StatusBadRequest, errPayload)
+			models.WriteError(w, errPayload)
 			return
 		}
 
@@ -165,13 +184,13 @@ func Upload(logger *logging.Logger, uploadService services.UploadService) http.H
 			attribute.String("video.request_id", params.RequestID),
 			attribute.String("video.user_id", params.UserID),
 			attribute.String("video.user_tier", string(params.UserTier)),
-			attribute.String("video.client_region", params.Region),
+			attribute.String("video.client_region_hint", params.ClientRegionHint),
 		)
 		span.AddEvent("upload.request.validated")
 
 		logger.Info(r.Context(), "upload.request_received", "Received upload request", uploadLogAttrs(r, &req)...)
 
-		response, err := uploadService.CreateUpload(r.Context(), params, req)
+		response, err := uploadService.CreateUpload(r.Context(), params, domainUploadRequest(req))
 		if err != nil {
 			errPayload := uploadErrorResponse(err)
 			span.AddEvent("upload.request.failed", trace.WithAttributes(
@@ -189,7 +208,7 @@ func Upload(logger *logging.Logger, uploadService services.UploadService) http.H
 					slog.String("reason", string(errPayload.Reason)),
 				)...,
 			)
-			writeJSON(w, errPayload.HttpStatus, errPayload)
+			models.WriteError(w, errPayload)
 			return
 		}
 
@@ -210,13 +229,7 @@ func Upload(logger *logging.Logger, uploadService services.UploadService) http.H
 			)...,
 		)
 
-		payload := &models.UploadResponse{
-			VideoID:             response.VideoID,
-			UploadURL:           response.UploadURL,
-			UploadURLExpiresAt:  response.UploadURLExpiresAt.UTC().Format("2006-01-02T15:04:05Z07:00"),
-			MaxFileSizeBytes:    response.MaxFileSizeBytes,
-			AllowedContentTypes: validation.AllowedContentTypesList(),
-		}
-		writeJSON(w, http.StatusCreated, payload)
+		payload := uploadResponse(response)
+		models.WriteJSON(w, http.StatusCreated, payload)
 	}
 }

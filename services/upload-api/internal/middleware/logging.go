@@ -28,7 +28,7 @@ func RequestLogging(logger *logging.Logger) Middleware {
 			requestID, _ := RequestIDFromContext(r.Context())
 			userID, _ := UserIDFromContext(r.Context())
 			userTier, _ := UserTierFromContext(r.Context())
-			clientRegion, _ := ClientRegionFromContext(r.Context())
+			clientRegionHint, _ := ClientRegionHintFromContext(r.Context())
 			logger.Info(
 				r.Context(),
 				"http.request",
@@ -36,7 +36,7 @@ func RequestLogging(logger *logging.Logger) Middleware {
 				slog.String("request_id", requestID),
 				slog.String("user_id", userID),
 				slog.String("user_tier", string(userTier)),
-				slog.String("client_region", clientRegion),
+				slog.String("client_region_hint", clientRegionHint),
 				slog.String("method", r.Method),
 				slog.String("path", r.URL.Path),
 				slog.Int("status_code", rw.statusCode),
